@@ -1,0 +1,47 @@
+# 手动触发或 tag 触发的构建 workflow（可选）。
+# 构建需要「自包含 runtime」：runtime/ 目录在打包时被 electron-builder 作为 extraResources 拷入。
+# 本地构建的朋友请直接看 README「从源码构建」；CI 构建需要把 runtime 缓存打进 GitHub Actions cache：
+#   - 在仓库 Settings -> Secrets and variables -> Actions 添加 Actions 变量 RUNTIME_CACHE_KEY（任意字符串，换 runtime 时改它）
+#   - 本地第一次跑：git checkout 后 gh actions cache 手动 seed（或用 gh workflow run 前，把 runtime/ 塞进 ~/.cache/...）
+# 简化方案：不用本 workflow，直接本地 npm run dist 后把安装包上传 Releases（推荐）。
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Prepare runtime (cache keyed)
+        shell: pwsh
+        run: |
+          $cacheKey = "${{ vars.RUNTIME_CACHE_KEY || 'default-runtime' }}"
+          $zip = Join-Path $env:RUNNER_TEMP "runtime-$cacheKey.zip"
+          if (Test-Path $zip) {
+            Expand-Archive -Path $zip -DestinationPath . -Force
+          } else {
+            Write-Host "::warning::runtime cache not found; run scripts/prepare-runtime.ps1 locally and upload a zip to the cache, or seed via gh. Falling back to inline prepare."
+            .\scripts\prepare-runtime.ps1
+          }
+
+      - run: npm ci
+
+      - name: Build NSIS installer
+        run: npm run dist
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: release/*.exe

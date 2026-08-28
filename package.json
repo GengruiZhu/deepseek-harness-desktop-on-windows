@@ -1,0 +1,52 @@
+{
+  "name": "dsh-desktop",
+  "version": "0.7.0",
+  "description": "DeepSeek Harness desktop client (self-contained, dsh 0.1.1-rc.2, minimalist, peak/valley badge + /usage, gengruizhu build)",
+  "main": "main.js",
+  "author": "gengruizhu",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.gengruizhu.dsh-desktop",
+    "productName": "DeepSeek Harness",
+    "copyright": "Copyright (c) 2026 gengruizhu",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "assets",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png",
+      "legalTrademarks": "gengruizhu"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DeepSeek Harness",
+      "uninstallDisplayName": "DeepSeek Harness (gengruizhu)"
+    }
+  }
+}
