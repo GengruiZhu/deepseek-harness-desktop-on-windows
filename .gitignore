@@ -4,6 +4,7 @@ node_modules/
 # --- Build output (installers are published via GitHub Releases, not git) ---
 release/
 dist/
+dist-upload/
 
 # --- Local runtime (packed Node + DSH runtime; must be prepared locally before build) ---
 runtime/
