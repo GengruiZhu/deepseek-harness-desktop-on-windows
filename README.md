@@ -25,7 +25,8 @@ DeepSeek Harness 官方以命令行 / 浏览器方式分发。本项目用 Elect
 
 | 版本 | 特性 |
 | --- | --- |
-| **0.7.0**（当前） | 极简主义重构：移除桌宠与右侧栏；新增峰谷计费时段徽章（附切换倒计时）；新增 `/usage`、`/explain-usage` 命令 |
+| 0.7.0-alpha.2 | Alpha 预发布：适配官方内核 0.1.2-alpha.2 一次性 token 鉴权（`?token=`，防 401） |
+| **0.7.0**（当前稳定版） | 极简主义重构：移除桌宠与右侧栏；新增峰谷计费时段徽章（附切换倒计时）；新增 `/usage`、`/explain-usage` 命令 |
 | 0.6.0 | DSH runtime 升级 0.1.1-rc.1；视觉模型、OAuth 登录；兼容 `.credentials.yaml` 新格式；拖动滑移根治 |
 | 0.5.x | 原生透明悬浮桌宠 + 右侧面板（0.7.0 起已移除） |
 | 0.3.0 | 系统托盘后台驻守、单实例 |
@@ -34,7 +35,7 @@ DeepSeek Harness 官方以命令行 / 浏览器方式分发。本项目用 Elect
 
 ## 安装
 
-从 **GitHub Releases** 下载最新的 `DeepSeek Harness Setup <版本>.exe`（约 150 MB，NSIS 安装器）：
+从 **GitHub Releases** 下载最新的 `DeepSeek Harness Setup <版本>.exe`（NSIS 安装器；0.7.0 约 150 MB，0.7.0-alpha.2 约 343 MB）：
 
 1. 双击安装，默认安装到用户目录，可自选路径
 2. 首次启动弹出配置窗口：填入 DeepSeek API Key（`sk-...`，从 [platform.deepseek.com](https://platform.deepseek.com) 获取）
@@ -42,6 +43,7 @@ DeepSeek Harness 官方以命令行 / 浏览器方式分发。本项目用 Elect
 
 > 使用要点：右上角 **X = 隐藏到托盘**（服务不中断）；托盘菜单可打开窗口 / 在浏览器打开 / 退出。
 > 无需预装 Node.js / pnpm / DSH 或任何其他环境。
+> 0.7.0-alpha.2 为 alpha 预发布（Releases 标记 Pre-release），稳定使用请选 0.7.0。
 
 ## 项目结构
 

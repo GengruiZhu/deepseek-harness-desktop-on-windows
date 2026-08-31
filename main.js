@@ -19,6 +19,10 @@ let setupWindow = null;
 let tray = null;
 let quitting = false;
 let isQuitting = false;
+// dsh 0.1.2+ 的 web 界面强制一次性 token 鉴权：URL 形如
+// http://127.0.0.1:<port>/?token=...，由服务端启动时打印在 stdout。
+// 桌面壳解析该行后用它打开窗口，避免 401。
+let authUrl = null;
 
 function getRuntimeDir() {
   const candidates = [];
@@ -57,6 +61,19 @@ async function waitForServer(host, port, timeoutMs) {
   return await probe(host, port, 1500);
 }
 
+/** dsh 0.1.2+ 打印 URL 行可能晚于端口就绪，等 token 出现。 */
+function getAppUrl() {
+  return authUrl || URL;
+}
+
+async function waitForAuthUrl(timeoutMs) {
+  const start = Date.now();
+  while (!authUrl && Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return authUrl;
+}
+
 function startServer() {
   if (!RUNTIME_DIR) return false;
   const nodeExe = path.join(RUNTIME_DIR, 'node', 'node.exe');
@@ -69,8 +86,15 @@ function startServer() {
     cwd: cwd,
     env: env,
     windowsHide: true,
-    stdio: 'ignore'
+    stdio: ['ignore', 'pipe', 'pipe']
   });
+  let stdoutBuf = '';
+  serverProc.stdout.on('data', (chunk) => {
+    stdoutBuf += chunk;
+    const m = stdoutBuf.match(/dsh web: (http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]+)/);
+    if (m) authUrl = m[1];
+  });
+  serverProc.stderr.on('data', () => {});
   spawnedByUs = true;
   return true;
 }
@@ -218,7 +242,7 @@ function createTray() {
 
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 DeepSeek Harness', click: showMainWindow },
-    { label: '在浏览器中打开', click: () => { shell.openExternal(URL); } },
+    { label: '在浏览器中打开', click: () => { shell.openExternal(getAppUrl()); } },
     { type: 'separator' },
     {
       label: '退出',
@@ -261,7 +285,7 @@ function createMainWindow() {
     }
   });
 
-  mainWindow.loadURL(URL);
+  mainWindow.loadURL(getAppUrl());
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.indexOf('127.0.0.1') !== -1 || url.indexOf('localhost') !== -1) {
@@ -381,6 +405,7 @@ if (!gotLock) {
         return;
       }
       running = await waitForServer(HOST, PORT, 120000);
+      if (running) await waitForAuthUrl(30000);
     }
     if (quitting) return;
     if (!running) {

@@ -3,7 +3,7 @@
 #
 # 用法：
 #   .\scripts\prepare-runtime.ps1            # 使用仓库根目录的 runtime/（已有则跳过）
-#   .\scripts\prepare-runtime.ps1 -NodeVersion 24.16.0 -DshVersion 0.1.1-rc.2
+#   .\scripts\prepare-runtime.ps1 -NodeVersion 24.16.0 -DshVersion 0.1.2-alpha.2
 #
 # 产出目录布局（与 package.json 的 extraResources 对应）：
 #   runtime\node\    portable Node.js（node.exe + 完整 npm/corepack）
@@ -14,7 +14,7 @@
 
 param(
   [string]$NodeVersion = '24.16.0',
-  [string]$DshVersion = '0.1.1-rc.2',
+  [string]$DshVersion = '0.1.2-alpha.2',
   [string]$RuntimeDir = (Join-Path $PSScriptRoot '..' 'runtime')
 )
 
