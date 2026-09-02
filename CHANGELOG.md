@@ -2,6 +2,17 @@
 
 桌面壳（Electron 包装器）版本记录。安装包：`DeepSeek Harness Setup <ver>.exe`。
 
+## 0.7.0-alpha.4 (2026-09-02)
+
+**官方内核 0.1.2-alpha.4（alpha 预发布，含 0.1.2-alpha.3 更新）**。
+
+- 父 Agent 与可持续子 Agent 支持 `send_message` 双向消息（取代单向 `report` 工具）
+- 模型目录支持搜索 / 筛选；自定义模型发现复用 Profile 请求头
+- 超长会话渲染与轮次导航优化；运行中追加 / 排队的图片可靠回显投递；`read_image` 支持无扩展名路径
+- 移除可选 SQLite 会话持久化后端（已有内容不删除；如需导出请用旧版本）
+- Web PTC Mode 默认不再暴露通用 `workflow` 工具；插件 API：`Session.events` → `seq` / `eventAt()` / `snapshotEvents()`
+- ⚠️ alpha 预发布：追求稳定请用 0.7.0。
+
 ## 0.7.0-alpha.2 (2026-08-31)
 
 **官方内核升级 0.1.2-alpha.2（alpha 预发布）**。
