@@ -25,8 +25,8 @@ DeepSeek Harness is officially distributed as a CLI / browser app. This project 
 
 | Version | Features |
 | --- | --- |
-| 0.7.0-alpha.4 | Alpha prerelease: official kernel 0.1.2-alpha.4; subagent `send_message` two-way messaging, model catalog search, long-conversation rendering improvements, SQLite session backend removed |
-| **0.7.0** (current stable) | Minimalist redesign: removed pet & side panel; added peak/off-peak billing badge (with countdown); added `/usage` and `/explain-usage` commands |
+| **0.7.0-rc.1** (current, Latest) | Official kernel 0.1.2-rc.1 (first candidate of the 0.1.2 line): subagent `send_message` two-way messaging, conversation UI overhaul, model catalog search, token auth, SQLite session backend removed |
+| **0.7.0** (stable, old kernel) | Minimalist redesign: removed pet & side panel; added peak/off-peak billing badge (with countdown); added `/usage` and `/explain-usage` commands |
 | 0.6.0 | DSH runtime 0.1.1-rc.1; vision models, OAuth login; new `.credentials.yaml` format support; drag-fix rework |
 | 0.5.x | Native transparent floating pet + side panel (removed since 0.7.0) |
 | 0.3.0 | System tray dwell, single instance |
@@ -35,7 +35,7 @@ Full changelog: [CHANGELOG.md](CHANGELOG.md) (Chinese)
 
 ## Installation
 
-Download the latest `DeepSeek Harness Setup <version>.exe` (NSIS installer; ~150 MB for 0.7.0, ~343 MB for alpha prereleases) from **GitHub Releases**:
+Download the latest `DeepSeek Harness Setup <version>.exe` (NSIS installer; ~343 MB, ~150 MB for the old-kernel 0.7.0) from **GitHub Releases**:
 
 1. Run the installer — default installs to your user directory, custom path allowed
 2. On first launch a setup window appears: enter your DeepSeek API Key (`sk-...`, get one at [platform.deepseek.com](https://platform.deepseek.com))
@@ -43,7 +43,7 @@ Download the latest `DeepSeek Harness Setup <version>.exe` (NSIS installer; ~150
 
 > Tips: clicking **X hides to tray** (server keeps running); use the tray menu to open / open-in-browser / quit.
 > No Node.js / pnpm / DSH or any other environment needed.
-> 0.7.0-alpha.2 is an alpha prerelease (marked Pre-release); pick 0.7.0 for a stable build.
+> 0.7.0-rc.1 is the candidate release for the 0.1.2 kernel line (marked Latest); pick 0.7.0 for the older, more conservative kernel.
 
 ## Project layout
 
