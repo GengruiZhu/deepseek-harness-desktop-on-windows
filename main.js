@@ -169,7 +169,10 @@ function copyDir(src, dst) {
 function ensureProfileManifest() {
   const profileDir = path.join(DSH_HOME, 'profiles', 'web');
   const manifestPath = path.join(profileDir, 'package.json');
-  if (fs.existsSync(manifestPath)) return;
+  if (fs.existsSync(manifestPath)) {
+    ensureNoBomJson(manifestPath);
+    return;
+  }
   fs.mkdirSync(profileDir, { recursive: true });
   const manifest = {
     name: 'dsh-profile-web',
@@ -193,7 +196,8 @@ function ensureBuiltinPlugins() {
     const profileDir = path.join(DSH_HOME, 'profiles', 'web');
     const profilePkgPath = path.join(profileDir, 'package.json');
     if (!fs.existsSync(profilePkgPath) || !RUNTIME_DIR) return;
-    const pkg = JSON.parse(fs.readFileSync(profilePkgPath, 'utf8'));
+    ensureNoBomJson(profilePkgPath);
+    const pkg = JSON.parse(readTextNoBom(profilePkgPath));
     if (!pkg.dsh || !pkg.dsh.profile || !Array.isArray(pkg.dsh.profile.bundles)) return;
     const bundles = pkg.dsh.profile.bundles;
     let changed = false;
@@ -261,6 +265,22 @@ function whaleDataUri() {
     const b64 = Buffer.from(fs.readFileSync(p)).toString('base64');
     return 'data:image/svg+xml;base64,' + b64;
   } catch (_) { return ''; }
+}
+
+// JSON parsers reject a UTF-8 BOM. Profiles written/edited by PowerShell or
+// older Notepad often carry one, which used to kill every later boot with
+// "Unexpected token '﻿'". Strip/normalize it before dsh reads the file.
+function readTextNoBom(file) {
+  const raw = fs.readFileSync(file, 'utf8');
+  return raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+}
+
+function ensureNoBomJson(file) {
+  if (!fs.existsSync(file)) return;
+  const buf = fs.readFileSync(file);
+  if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+    fs.writeFileSync(file, buf.slice(3), 'utf8');
+  }
 }
 
 // ---- Boot window UI (status first, errors copyable) ----

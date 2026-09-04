@@ -2,6 +2,15 @@
 
 桌面壳（Electron 包装器）版本记录。安装包：`DeepSeek Harness Setup <ver>.exe`。
 
+## 0.7.2-rc.1 (2026-09-04)
+
+**维护清理**（内核仍为 dsh 0.1.2-rc.1）。
+
+- 移除启动期冗余的 BOM 清理逻辑（`readTextNoBom` / `ensureNoBomJson`）：profile manifest 已由
+  0.7.1 的 `ensureProfileManifest` 规范创建（无 BOM、结构完整），无需每次启动再转换
+- 简化 profile package.json 读取路径，保持与 0.7.1 相同的启动体验（启动页 / 单窗口 / 错误可复制 / 自动端口）
+- ⚠️ rc 候选版：追求更保守的旧内核请用 0.7.0。
+
 ## 0.7.1-rc.1 (2026-09-04)
 
 **启动体验重构**（内核仍为 dsh 0.1.2-rc.1）。

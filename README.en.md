@@ -26,7 +26,7 @@ DeepSeek Harness is officially distributed as a CLI / browser app. This project 
 
 | Version | Features |
 | --- | --- |
-| **0.7.1-rc.1** (current, Latest) | Startup rework: instant startup page, single window (no duplicates), copyable errors, **auto free-port allocation** (no more fixed 3080); kernel 0.1.2-rc.1 |
+| **0.7.2-rc.1** (current, Latest) | Startup rework (introduced in 0.7.1) + maintenance cleanup (slim profile BOM handling); kernel 0.1.2-rc.1 |
 | **0.7.0** (stable, old kernel) | Minimalist redesign: removed pet & side panel; added peak/off-peak billing badge (with countdown); added `/usage` and `/explain-usage` commands |
 | 0.6.0 | DSH runtime 0.1.1-rc.1; vision models, OAuth login; new `.credentials.yaml` format support; drag-fix rework |
 | 0.5.x | Native transparent floating pet + side panel (removed since 0.7.0) |
