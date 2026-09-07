@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
-  "version": "0.7.2-rc.1",
-  "description": "DeepSeek Harness desktop client (self-contained, dsh 0.1.2-rc.1, minimalist, peak/valley badge + /usage, gengruizhu build)",
+  "version": "0.7.3-rc.1",
+  "description": "DeepSeek Harness desktop client (self-contained, dsh 0.1.2-rc.1, peak/valley badge + /usage + settings (software info/appearance/workspace), gengruizhu build)",
   "main": "main.js",
   "author": "gengruizhu",
   "license": "MIT",

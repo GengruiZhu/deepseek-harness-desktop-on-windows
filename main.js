@@ -53,7 +53,8 @@ function startServer() {
   const cli = path.join(RUNTIME_DIR, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
   const cwd = path.join(RUNTIME_DIR, 'dsh');
   const env = Object.assign({}, process.env, {
-    PATH: path.join(RUNTIME_DIR, 'node') + path.delimiter + (process.env.PATH || '')
+    PATH: path.join(RUNTIME_DIR, 'node') + path.delimiter + (process.env.PATH || ''),
+    DSH_APP_VERSION: app.getVersion()
   });
   // Port 0 asks the OS for a free port; the real URL (with port and, on
   // dsh >= 0.1.2, its one-time token) is parsed from the server's stdout.
@@ -228,12 +229,16 @@ function ensureBuiltinPlugins() {
       const dst = path.join(profileDir, 'node_modules', ...parts);
       const rowPresent = bundles.includes(name);
       let present = fs.existsSync(dst);
-      if (!present && fs.existsSync(src)) {
+      // Always refresh built-ins from the installed runtime: an upgrade must
+      // replace a stale profile copy (a plugin only copied when missing left
+      // old versions active forever).
+      if (fs.existsSync(src)) {
         try {
+          if (present) fs.rmSync(dst, { recursive: true, force: true });
           copyDir(src, dst);
           present = fs.existsSync(dst);
         } catch (_) {
-          present = false;
+          present = fs.existsSync(dst);
         }
       }
       if (!rowPresent && present) {
