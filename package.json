@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.8.0-rc.1",
+  "version": "0.8.1-rc.1",
   "description": "DeepSeek Harness desktop client (self-contained, dsh 0.1.5-rc.1, peak/valley badge + /usage card + settings, gengruizhu build)",
   "main": "main.js",
   "author": "gengruizhu",

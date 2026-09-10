@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage, session } = require('electron');
 const { spawn, exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -6,6 +6,62 @@ const os = require('os');
 
 const HOST = '127.0.0.1';
 const BOOT_WAIT_MS = 120000;
+const CHAT_PARTITION = 'persist:dsh-fenggu-chat';
+
+/**
+ * 以内嵌网页的身份去访问 chat.deepseek.com 时用的 UA。
+ * 站点看到 UA 里的 "Electron/xx" 会判「使用环境异常」，所以这里直接由当前
+ * Chromium 版本拼一个普通 Chrome 的 UA —— 每次启动跟着内核走，不用手写死。
+ */
+function plainChromeUA() {
+  const chrome = (process.versions && process.versions.chrome) || '130.0.0.0';
+  return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chrome + ' Safari/537.36';
+}
+
+/** 在 Chat 面板那个分区上把 UA 定死，页面一加载就是它。 */
+function applyChatUserAgent() {
+  try {
+    session.fromPartition(CHAT_PARTITION).setUserAgent(plainChromeUA());
+  } catch (_) {}
+}
+
+/**
+ * 在 chat 页面里跑的提取器：把整段会话（不只当前可见的那屏）取出来。
+ * 页面没有虚拟滚动，所以 DOM 里就是全部消息；按「最长的可滚动容器」定位列表，
+ * 再取它下面文本子节点最多的那一层当消息行。角色只是启发式判断，正文一定是原文。
+ */
+const CHAT_EXTRACT_SOURCE = String.raw`(() => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  let scroller = null;
+  let bestScroll = 0;
+  for (const el of document.querySelectorAll('div')) {
+    if (!visible(el) || el.clientHeight < 200) continue;
+    if (el.scrollHeight > el.clientHeight + 80 && el.scrollHeight > bestScroll) {
+      bestScroll = el.scrollHeight;
+      scroller = el;
+    }
+  }
+  const root = scroller || document.body;
+  let bestRows = null;
+  const walk = (el, depth) => {
+    if (!el || depth > 14) return;
+    const kids = Array.from(el.children).filter((c) => (c.innerText || '').trim().length > 0);
+    if (kids.length >= 2 && (!bestRows || kids.length > bestRows.length)) bestRows = kids;
+    for (const c of kids) walk(c, depth + 1);
+  };
+  walk(root, 0);
+  const rows = (bestRows || []).map((el) => {
+    const text = (el.innerText || '').trim();
+    const rich = !!el.querySelector('.katex, pre, code, table, [class*="markdown"]');
+    return { role: rich ? 'assistant' : 'user', text };
+  }).filter((r) => r.text.length > 0);
+  return {
+    text: (root.innerText || '').trim(),
+    messages: rows,
+    rows: rows.length,
+    scrollHeight: root.scrollHeight || 0,
+  };
+})()`;
 
 const DSH_HOME = path.join(os.homedir(), '.dsh');
 const CRED_FILE = path.join(DSH_HOME, '.credentials.yaml');
@@ -17,6 +73,9 @@ let setupWindow = null;
 let tray = null;
 let quitting = false;
 let isQuitting = false;
+// 内嵌 Chat 面板（chat.deepseek.com）的 guest webContents。只有它允许被读取：
+// 读的是页面可见文字，落到本地存档，并供 agent 取用。
+let chatGuest = null;
 // Boot state machine: the window opens immediately with a status page and the
 // server is pulled up behind it. Errors land on the same page as copyable text.
 let booting = false;
@@ -397,7 +456,10 @@ function createMainWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // 左侧栏的 Chat 面板内嵌 chat.deepseek.com。该站发 frame-ancestors 'none'，
+      // 普通 iframe 一定被拒；<webview> 是独立顶层上下文，不受这个限制。
+      webviewTag: true
     }
   });
 
@@ -428,6 +490,11 @@ function createMainWindow() {
     }
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
+    chatGuest = guest;
+    guest.on('destroyed', () => { if (chatGuest === guest) chatGuest = null; });
   });
 
   // X button -> hide to tray (background dwell); Quit via tray menu really exits.
@@ -586,7 +653,26 @@ ipcMain.on('dsh-set-api-key', (event, key) => {
   }
 });
 
-ipcMain.on('dsh-boot-action', (event, action) => {
+// Chat 面板读取桥：只认 chat.deepseek.com 那个 guest，只回可见文字。
+// Chat 面板读取桥：只认 chat.deepseek.com 那个 guest，只回该页面自己的内容。
+ipcMain.handle('dsh-chat-read', async () => {
+  try {
+    if (!chatGuest || chatGuest.isDestroyed()) return { ok: false, error: 'Chat 面板还没打开' };
+    const url = chatGuest.getURL() || '';
+    if (url.indexOf('chat.deepseek.com') === -1) return { ok: false, error: '当前页面不是 chat.deepseek.com' };
+    const data = await chatGuest.executeJavaScript(CHAT_EXTRACT_SOURCE, true);
+    return {
+      ok: true,
+      url,
+      title: chatGuest.getTitle() || '',
+      text: String((data && data.text) || ''),
+      messages: Array.isArray(data && data.messages) ? data.messages : [],
+      rows: Number((data && data.rows) || 0),
+    };
+  } catch (e) {
+    return { ok: false, error: e && e.message ? e.message : String(e) };
+  }
+});ipcMain.on('dsh-boot-action', (event, action) => {
   if (action === 'quit') {
     isQuitting = true;
     quitting = true;
@@ -606,6 +692,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    applyChatUserAgent();
     createTray();
     createMainWindow(); // window first; server boots behind it
     await bootApp(false);

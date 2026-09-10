@@ -19,14 +19,27 @@ DeepSeek Harness is officially distributed as a CLI / browser app. This project 
 - Tray-resident (close-to-tray, single instance, single window) with a first-run DeepSeek API key setup page
 - Bundles a small personal plugin: billing peak/off-peak badge and `/usage` balance command
 - Startup failures show a copyable error page (reason / stderr / exit code / URL / retry) immediately
+- An embedded **DeepSeek web panel** (`chat.deepseek.com`) in the left sidebar, with web conversations archived locally per day (see the notice below)
 
 > ⚠️ This is an **unofficial** third-party wrapper, not affiliated with DeepSeek. All DeepSeek trademarks belong to their respective owners.
+
+## ⚠️ Notice: No Reverse Proxying
+
+Since 0.8.1 the app embeds the DeepSeek web app (`chat.deepseek.com`) in the left sidebar as a convenience panel. Please read before use:
+
+- **Reverse proxying of any kind is prohibited**: do not use this project (including its embedded panel, text-extraction bridge, or conversation archive) to provide a proxy, relay, mirror, or multi-user sharing service, and do not use it to bypass official access controls, risk controls, or regional restrictions.
+- The integration exists **solely for local, single-user convenience** — no more keeping a browser tab open next to the desktop app.
+- **There is no server-side forwarding**: what is embedded is the official page itself, talking directly to the official site; the app only reads that page's **visible text** on this machine and stores it locally (`~/.dsh/web-chat/`). Nothing is uploaded or relayed to any third party.
+- Use of this app is subject to DeepSeek's official terms of service; any consequences are the user's own.
+
+> If the official side objects to this integration, stop using the related features.
 
 ## Features
 
 | Version | Features |
 | --- | --- |
-| **0.8.0-rc.1** (current, Latest) | Major kernel upgrade to **dsh 0.1.5-rc.1**: session format V3 (⚠️ no downgrade reads), `DeepSeek-V41-Flash` model, reworked right Sidebar, arbitrary file uploads, subagent queue/steer; in-app **check updates / one-click upgrade / rollback** (streamed download with progress); shell code unchanged |
+| **0.8.1-rc.1** (current, Latest) | Embedded **DeepSeek web panel** (`chat.deepseek.com`, no browser tab needed) with per-day local archiving to `~/.dsh/web-chat/`; new "Session versions" management in Settings (list / probe / convert / hide / show); download-then-install upgrade flow; see **Notice: No Reverse Proxying**. Kernel 0.1.5-rc.1 |
+| **0.8.0-rc.1** | Major kernel upgrade to **dsh 0.1.5-rc.1**: session format V3 (⚠️ no downgrade reads), `DeepSeek-V41-Flash` model, reworked right Sidebar, arbitrary file uploads, subagent queue/steer; in-app **check updates / one-click upgrade / rollback** (streamed download with progress) |
 | **0.7.0** (stable, old kernel) | Minimalist redesign: removed pet & side panel; added peak/off-peak billing badge (with countdown); added `/usage` and `/explain-usage` commands |
 | 0.6.0 | DSH runtime 0.1.1-rc.1; vision models, OAuth login; new `.credentials.yaml` format support; drag-fix rework |
 | 0.5.x | Native transparent floating pet + side panel (removed since 0.7.0) |

@@ -2,6 +2,17 @@
 
 桌面壳（Electron 包装器）版本记录。安装包：`DeepSeek Harness Setup <ver>.exe`。
 
+## 0.8.1-rc.1 (2026-09-10)
+
+**内嵌网页版 DeepSeek + 会话版本管理**（内核仍为 dsh 0.1.5-rc.1；壳代码有改动）。
+
+- **内嵌网页版 DeepSeek 面板**：左侧栏以 `<webview>` 加载 `chat.deepseek.com`（该站 `frame-ancestors 'none'`，普通 iframe 必被拒；`webview` 是独立顶层上下文不受此限），并按当前 Chromium 版本拼普通 Chrome UA，避免被判「使用环境异常」
+- **网页会话本地归档**：面板打开期间定期把页面可见文字同步到 `~/.dsh/web-chat/`（按天 JSONL + `latest.json` + `index.json` 索引），并提供手动快照端点；主进程只允许读取 `chat.deepseek.com` 那个 guest 页面，其余页面一律拒绝
+- **设置新增「会话版本」**：新增 `tools/dsh-session-version.mjs`，支持 list / probe / convert / hide / show，便于查看与处理 V3 会话
+- **升级流程细化**：下载与安装拆开（`POST /api/dsh-about/download` 只下载、`POST /api/dsh-about/run-installer` 再安装），可按需先下载、稍后安装
+- ⚠️ **声明：禁止任何形式的反向代理** —— 内嵌网页版仅为个人本机便利（免去另开浏览器挂着网页版）；不得利用本项目对外提供代理 / 转发 / 镜像 / 多用户共享服务，不得用于绕过官方访问控制、风控或地区限制。集成**无服务端转发**（嵌入的就是官方页面本身，直接访问官方站点），只在本机保存页面可见文字；请遵守 DeepSeek 官方服务条款。详见 README「声明：禁止反向代理」一节。
+- ⚠️ rc 候选版：追求更保守的旧内核请用 0.7.0。
+
 ## 0.8.0-rc.1 (2026-09-10)
 
 **官方内核大版本升级 0.1.2-rc.1 → 0.1.5-rc.1**（0.1.5 系列首个候选版，汇总自 0.1.2-rc.1 的全部变更；**壳代码无需改动**）。
