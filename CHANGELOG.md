@@ -2,6 +2,17 @@
 
 桌面壳（Electron 包装器）版本记录。安装包：`DeepSeek Harness Setup <ver>.exe`。
 
+## 0.7.4-rc.1 (2026-09-09)
+
+**`/usage` 富卡片**（壳代码无变化；内核仍为 dsh 0.1.2-rc.1）。
+
+- `/usage` 输出从纯文本升级为**卡片**：账户余额（含币种）/ 今日花费 / 今日 Token / 当前计费时段进度
+- 新增聚合端点 `/api/fenggu/usage-card`：并行取余额（API Key → `api.deepseek.com/user/balance`）
+  与平台用量（网页会话令牌 → `platform.deepseek.com/api/v0/usage/by_api_key/{cost,amount}`）
+- 平台用量令牌设置引导（登录 platform.deepseek.com/usage → F12 取 `localStorage.userToken` 粘贴保存，本地存储、重启自动读取）
+- 用量查询失败时卡片内提示原因并可重设令牌（余额查询不受影响）
+- ⚠️ rc 候选版：追求更保守的旧内核请用 0.7.0。
+
 ## 0.7.3-rc.1 (2026-09-07)
 
 **内置插件增强**（内核仍为 dsh 0.1.2-rc.1）。
