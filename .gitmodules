@@ -1,0 +1,5 @@
+[submodule "vendor/deepseek-harness"]
+	path = vendor/deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git
+	branch = dsh-v0.1.6-alpha.1
+	shallow = true

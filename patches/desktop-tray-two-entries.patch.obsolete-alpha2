@@ -1,0 +1,73 @@
+diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
+index c1fc91e..d7d0a79 100644
+--- a/apps/desktop/src/locale.ts
++++ b/apps/desktop/src/locale.ts
+@@ -53,7 +53,6 @@ export const en = {
+   refreshed: 'Plugin list refreshed.',
+   loadingPlugins: 'Reading Desktop plugins…',
+   trayOpen: 'Open DeepSeek Harness',
+-  trayBrowser: 'Open in Browser',
+   trayQuit: 'Quit',
+ } as const
+ 
+@@ -113,7 +112,6 @@ export const zh = {
+   refreshed: '插件列表已刷新。',
+   loadingPlugins: '正在读取桌面插件…',
+   trayOpen: '打开 DeepSeek Harness',
+-  trayBrowser: '在浏览器中打开',
+   trayQuit: '退出',
+ } as const satisfies DesktopMessages
+ 
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 09571d7..f449814 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -39,8 +39,6 @@ const SCHEME = 'dsh-app'
+ const CHAT_PARTITION = 'persist:dsh-fenggu-chat'
+ /** Site the in-app Chat panel may load; its sign-in flow stays on this domain family. */
+ const CHAT_SITE = 'deepseek.com'
+-/** Browser target for the tray's "open in browser" entry. */
+-const BROWSER_CHAT_URL = `https://chat.${CHAT_SITE}`
+ /** The site refuses a client whose user agent says "Electron"; report the bundled Chromium. */
+ const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+   + `(KHTML, like Gecko) Chrome/${process.versions.chrome ?? '120.0.0.0'} Safari/537.36`
+@@ -574,15 +572,13 @@ async function main(): Promise<void> {
+ 
+   // A native menu strip above our own window bar reads like a widget pasted on from outside, and
+   // it duplicates entries the shell already owns. Plugin administration lives in the settings
+-  // page and updates in the "software information" section, so the tray keeps three entries only.
++  // page and updates in the "software information" section, so the tray keeps two entries only.
+   Menu.setApplicationMenu(null)
+   shellTray = createShellTray({
+     tooltip: app.name,
+     openLabel: messages.trayOpen,
+-    browserLabel: messages.trayBrowser,
+     quitLabel: messages.trayQuit,
+     onOpen: () => { focusPrimaryWindow() },
+-    onBrowser: () => { void shell.openExternal(BROWSER_CHAT_URL) },
+     onQuit: () => { app.quit() },
+   })
+ 
+diff --git a/apps/desktop/src/shell-ui.ts b/apps/desktop/src/shell-ui.ts
+index 29cb019..602f527 100644
+--- a/apps/desktop/src/shell-ui.ts
++++ b/apps/desktop/src/shell-ui.ts
+@@ -434,10 +434,8 @@ export function installShellBar(contents: WebContents, options: ShellBarOptions)
+ export interface ShellTrayOptions {
+   readonly tooltip: string
+   readonly openLabel: string
+-  readonly browserLabel: string
+   readonly quitLabel: string
+   readonly onOpen: () => void
+-  readonly onBrowser: () => void
+   readonly onQuit: () => void
+ }
+ 
+@@ -453,7 +451,6 @@ export function createShellTray(options: ShellTrayOptions): Tray | undefined {
+   tray.setToolTip(options.tooltip)
+   tray.setContextMenu(Menu.buildFromTemplate([
+     { label: options.openLabel, click: options.onOpen },
+-    { label: options.browserLabel, click: options.onBrowser },
+     { type: 'separator' },
+     { label: options.quitLabel, click: options.onQuit },
+   ]))

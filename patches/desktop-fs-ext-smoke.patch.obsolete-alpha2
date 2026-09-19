@@ -1,0 +1,58 @@
+diff --git a/apps/desktop/tests/fixtures/runtime-payload-smoke.mjs b/apps/desktop/tests/fixtures/runtime-payload-smoke.mjs
+index da2d5c4..c200fff 100644
+--- a/apps/desktop/tests/fixtures/runtime-payload-smoke.mjs
++++ b/apps/desktop/tests/fixtures/runtime-payload-smoke.mjs
+@@ -64,9 +64,22 @@ async function checkPty() {
+   }
+ }
+ 
+-/** fs-ext implements seek on Windows through SetFilePointerEx and on POSIX through lseek. */
++/**
++ * fs-ext implements seek on Windows through SetFilePointerEx and on POSIX through lseek.
++ *
++ * The 0.1.6 production closure no longer ships fs-ext: the session write lock's flock face
++ * moved into the first-party `@deepseek-ai/node-addon-system` addon, so this third-party
++ * optional native module is legitimately absent from the prepared runtime. Report its
++ * presence instead of failing the smoke when it is missing.
++ * @returns Whether fs-ext was available and exercised.
++ */
+ function checkFsExt() {
+-  const fsExt = requireRuntime('fs-ext')
++  let fsExt
++  try {
++    fsExt = requireRuntime('fs-ext')
++  } catch {
++    return false
++  }
+   const file = join(scratch, 'seek.txt')
+   writeFileSync(file, 'abcdef', { flag: 'wx', mode: 0o600 })
+   const fd = openSync(file, 'r')
+@@ -78,6 +91,7 @@ function checkFsExt() {
+   } finally {
+     closeSync(fd)
+   }
++  return true
+ }
+ 
+ /** Resolve one system function through Koffi's packaged native module. */
+@@ -120,8 +134,10 @@ function checkHtml() {
+   assert.match(markdown, /\| x\s+\| 7\s+\|/u)
+ }
+ 
++let fsExtPresent = false
++
+ try {
+-  checkFsExt()
++  fsExtPresent = checkFsExt()
+   checkKoffi()
+   await checkSharp()
+   checkHtml()
+@@ -133,6 +149,6 @@ try {
+ 
+ // Natural event-loop drain includes node-pty's worker and console-list helper teardown.
+ process.once('beforeExit', () => {
+-  console.log(JSON.stringify({ node: process.versions.node, platform: process.platform, arch: process.arch,
+-    fsExt: true, koffi: true, sharp: true, html: true, pty: true }))
++    console.log(JSON.stringify({ node: process.versions.node, platform: process.platform, arch: process.arch,
++    fsExt: fsExtPresent, koffi: true, sharp: true, html: true, pty: true }))
+ })

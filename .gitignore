@@ -11,7 +11,10 @@ runtime/
 runtime-flat/
 
 # --- Non-source artifacts ---
-plugins/
+# 自带插件自 0.9.0 起随仓库发布：宠物资源已经挪到 pet-assets 分支，
+# 插件本体只剩 ~260 KB 的源码，没有必要再走 npm 包那条路（它以前是因为
+# 带着 120 MB 宠物才被忽略的）。万一有人把宠物 zip 拖进来，仍然忽略掉。
+plugins/**/pets/*.zip
 pet-ref/
 NVIDIA Corporation/
 .dsh-backup-*/
@@ -23,6 +26,16 @@ NVIDIA Corporation/
 build-log.txt
 dev-run.log
 dist-build.pid
+# 打包与验收的中间产物（隔离 DSH_HOME、截图、探针结果、调试脚本）都在这里，
+# 体积大而且没有复用价值 —— 别提交，需要时本地留着看即可。
+work/
+# 0.9.1 起官方 desktop 的构建/验证工作区（pnpm store、解包后的 asar、探针输出），
+# 近 900 MB —— 同理不入库。
+werk/
+# 官方仓库 submodule 的依赖与构建产物（submodule 只记录 commit）
+vendor/deepseek-harness/node_modules/
+vendor/deepseek-harness/**/dist/
+vendor/deepseek-harness/**/.turbo/
 
 # --- Electron-builder ---
 builder-debug.yml

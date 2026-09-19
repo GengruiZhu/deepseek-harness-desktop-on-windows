@@ -1,0 +1,92 @@
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index ea33c60b..da62ecbe 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -1,4 +1,5 @@
+ import { join } from 'node:path'
++import { existsSync, readdirSync, rmSync } from 'node:fs'
+ import { fileURLToPath } from 'node:url'
+ import { execFile } from 'node:child_process'
+ import { promisify } from 'node:util'
+@@ -41,7 +42,6 @@ export function createElectronBuilderConfig(
+   preparedRuntime = undefined,
+ ) {
+   const appId = resolveDesktopAppId(env)
+-  const policy = resolveDesktopPolicyEnvironment(env)
+   const targetPlatform = env.DSH_DESKTOP_TARGET_PLATFORM
+   const resolvedPlatform = targetPlatform ?? hostPlatform
+   const resolvedArch = env.DSH_DESKTOP_TARGET_ARCH ?? hostArch
+@@ -50,6 +50,10 @@ export function createElectronBuilderConfig(
+   }
+   const unsigned = env.DSH_DESKTOP_UNSIGNED === '1'
+   if (unsigned && resolvedPlatform !== 'win32') throw new Error('desktop package: unsigned builds require Windows')
++  // An unsigned local build is not provisioned against the official policy service, so it records
++  // no policy at all: the shell then never gates startup on a request to a server this build has
++  // no account with, and the application stays usable offline.
++  const policy = unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
+   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
+   const packagesWindows = resolvedPlatform === 'win32'
+   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
+@@ -77,11 +81,21 @@ export function createElectronBuilderConfig(
+   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+   return {
+     appId,
+-    extraMetadata: { dshDesktopAppId: appId, dshMandatoryUpdatePolicy: policy },
+-    productName: 'DeepSeek Harness',
+-    artifactName: 'deepseek-harness-${version}-${os}-${arch}.${ext}',
++    extraMetadata: {
++      dshDesktopAppId: appId,
++      dshMandatoryUpdatePolicy: policy,
++      // The shell's own release label. The packaged version stays the bundled kernel's version,
++      // so this is the only place the published installer version can reach the application.
++      dshDesktopReleaseLabel: env.DSH_DESKTOP_RELEASE_LABEL,
++    },
++    productName: env.DSH_DESKTOP_PRODUCT_NAME ?? 'DeepSeek Harness',
++    artifactName: env.DSH_DESKTOP_ARTIFACT_NAME ?? 'deepseek-harness-${version}-${os}-${arch}.${ext}',
+     directories: { output: unsigned ? join(buildPaths.root, 'unsigned-artifacts') : buildPaths.artifacts },
+     asar: true,
++    // The payload is dominated by the bundled LibreOffice engine and the Python/Node interpreter
++    // runtime, so the archive and installer get the strongest 7z level: same bytes in, smaller
++    // file out, at the cost of build time only.
++    compression: 'maximum',
+     electronDist: buildPaths.electron,
+     electronFuses: { runAsNode: true },
+     beforeBuild: async () => {
+@@ -116,7 +130,9 @@ export function createElectronBuilderConfig(
+     ],
+     extraResources: [
+       { from: buildPaths.runtime, to: 'runtime' },
+-      { from: fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)), to: 'icon.png' },
++      { from: env.DSH_DESKTOP_ICON ?? fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)), to: 'icon.png' },
++      ...(env.DSH_DESKTOP_EXTRA_ASSETS === undefined ? [] : [{ from: env.DSH_DESKTOP_EXTRA_ASSETS, to: 'assets' }]),
++      ...(env.DSH_DESKTOP_PLUGINS_DIR === undefined ? [] : [{ from: env.DSH_DESKTOP_PLUGINS_DIR, to: 'plugins' }]),
+     ],
+     mac: {
+       icon: fileURLToPath(new URL('../resources/icon-macos.png', import.meta.url)),
+@@ -142,6 +158,17 @@ export function createElectronBuilderConfig(
+     afterPack: async context => {
+       const { verifyDesktopRuntime, writeDesktopRuntime } = await import('../lib/types/runtime-tree.js')
+       const resourcesDir = context.packager.getResourcesDir(context.appOutDir)
++      // Electron ships a resource pack for every locale it speaks; this application ships exactly
++      // two dictionaries (see src/locale.ts), so the other ~50 packs are only installer weight.
++      if (resolvedPlatform === 'win32') {
++        const localesDir = join(context.appOutDir, 'locales')
++        if (existsSync(localesDir)) {
++          for (const entry of readdirSync(localesDir)) {
++            if (entry === 'en-US.pak' || entry === 'zh-CN.pak') continue
++            rmSync(join(localesDir, entry), { force: true })
++          }
++        }
++      }
+       if (resolvedPlatform === 'darwin' && update !== undefined) {
+         await writeMacOSAppUpdateConfig(resourcesDir, resolveMacOSAppUpdateFeed(context.packager.config.publish),
+           context.packager.appInfo.updaterCacheDirName)
+@@ -174,7 +201,7 @@ export function createElectronBuilderConfig(
+       )
+     },
+     win: {
+-      icon: fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)),
++      icon: env.DSH_DESKTOP_ICON ?? fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)),
+       forceCodeSigning: !unsigned,
+       signtoolOptions: {
+         sign: windowsSigner,

@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
-  "version": "0.8.1-rc.1",
-  "description": "DeepSeek Harness desktop client (self-contained, dsh 0.1.5-rc.1, peak/valley badge + /usage card + settings, gengruizhu build)",
+  "version": "0.9.1-alpha2",
+  "description": "DeepSeek Harness desktop client (self-contained, dsh 0.1.6-alpha.2, official apps/desktop shell + patches, gengruizhu build)",
   "main": "main.js",
   "author": "gengruizhu",
   "license": "MIT",
@@ -10,8 +10,8 @@
     "dist": "electron-builder --win nsis"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "33.2.0",
+    "electron-builder": "25.1.8"
   },
   "build": {
     "appId": "com.gengruizhu.dsh-desktop",
@@ -28,7 +28,7 @@
     ],
     "extraResources": [
       {
-        "from": "runtime",
+        "from": "runtime-0.1.6-alpha.1",
         "to": "runtime"
       }
     ],

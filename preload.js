@@ -10,3 +10,8 @@ contextBridge.exposeInMainWorld('dshBoot', {
 contextBridge.exposeInMainWorld('dshChat', {
   read: () => ipcRenderer.invoke('dsh-chat-read')
 });
+// 顶栏配色：页面背景是主题（浅色/深色）说了算，主进程据此把窗口那条也刷成同色，
+// 否则系统按钮所在的区域会和界面分成两块（就是「拼贴感」的来源）。
+contextBridge.exposeInMainWorld('dshShell', {
+  titlebar: (color) => ipcRenderer.send('dsh-titlebar-color', color)
+});

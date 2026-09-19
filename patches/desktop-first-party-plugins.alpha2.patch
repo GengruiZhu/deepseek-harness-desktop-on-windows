@@ -1,0 +1,168 @@
+diff --git a/apps/desktop/src/bundled-plugins.ts b/apps/desktop/src/bundled-plugins.ts
+new file mode 100644
+index 00000000..7d4cc8ef
+--- /dev/null
++++ b/apps/desktop/src/bundled-plugins.ts
+@@ -0,0 +1,140 @@
++/**
++ * First-party plugins that ship inside the application (resources/plugins) have to end up as real
++ * directories in the Electron-owned profile: the kernel resolves a profile bundle from the
++ * profile's own node_modules, and the desktop profile rejects linked package directories.
++ *
++ * The profile copy is compared by CONTENT FINGERPRINT, not by the manifest version alone. A plugin
++ * that keeps its version number while its sources change (ours does) would otherwise stay stale in
++ * every profile an earlier build materialized, which looks exactly like "the new build does
++ * nothing".
++ */
++import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
++import { createHash } from 'node:crypto'
++import { dirname, join, relative } from 'node:path'
++
++interface BundledPlugin {
++  readonly name: string
++  readonly version: string
++  readonly directory: string
++}
++
++const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/
++
++function readManifest(directory: string): { name: string; version: string } | undefined {
++  try {
++    const value: unknown = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
++    if (typeof value !== 'object' || value === null) return undefined
++    const { name, version } = value as { name?: unknown; version?: unknown }
++    if (typeof name !== 'string' || typeof version !== 'string') return undefined
++    if (!PACKAGE_NAME_PATTERN.test(name) || version.length === 0) return undefined
++    return { name, version }
++  } catch {
++    return undefined
++  }
++}
++
++/** Relative path + byte length + SHA-256 of every file in the package, in stable order. */
++function contentFingerprint(directory: string): string | undefined {
++  const hash = createHash('sha256')
++  const walk = (current: string): boolean => {
++    let children
++    try {
++      children = readdirSync(current, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))
++    } catch {
++      return false
++    }
++    for (const child of children) {
++      const full = join(current, child.name)
++      if (child.isDirectory()) {
++        if (!walk(full)) return false
++        continue
++      }
++      if (!child.isFile()) continue
++      try {
++        const body = readFileSync(full)
++        hash.update(relative(directory, full).split('\\').join('/'))
++        hash.update('\u0000')
++        hash.update(String(body.byteLength))
++        hash.update('\u0000')
++        hash.update(createHash('sha256').update(body).digest('hex'))
++        hash.update('\u0000')
++      } catch {
++        return false
++      }
++    }
++    return true
++  }
++  try {
++    if (!statSync(directory).isDirectory()) return undefined
++  } catch {
++    return undefined
++  }
++  return walk(directory) ? hash.digest('hex') : undefined
++}
++
++function listBundledPlugins(source: string): BundledPlugin[] {
++  let entries
++  try {
++    entries = readdirSync(source, { withFileTypes: true })
++  } catch {
++    return []
++  }
++  const plugins: BundledPlugin[] = []
++  for (const entry of entries) {
++    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
++    const directory = join(source, entry.name)
++    const manifest = readManifest(directory)
++    if (manifest === undefined) continue
++    plugins.push({ name: manifest.name, version: manifest.version, directory })
++  }
++  return plugins
++}
++
++function addToProfileBundles(profile: string, names: readonly string[]): boolean {
++  const manifestPath = join(profile, 'package.json')
++  let manifest: Record<string, unknown>
++  try {
++    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>
++  } catch {
++    return false
++  }
++  const dsh = (manifest.dsh ?? (manifest.dsh = {})) as Record<string, unknown>
++  const profileSection = (dsh.profile ?? (dsh.profile = {})) as Record<string, unknown>
++  const bundles = Array.isArray(profileSection.bundles) ? (profileSection.bundles as unknown[]) : []
++  const missing = names.filter(name => !bundles.includes(name))
++  if (missing.length === 0) return false
++  profileSection.bundles = [...bundles, ...missing].sort((left, right) => String(left).localeCompare(String(right)))
++  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
++  return true
++}
++
++/**
++ * Materialize every bundled plugin into the profile, refreshing copies whose content changed.
++ * @param profile - Electron-owned desktop profile directory.
++ * @param source - Directory of first-party plugin packages carried by this installation.
++ * @param log - Optional sink for refresh lines (the caller owns logging).
++ * @returns Whether the profile changed, so the caller can run a validation pass.
++ */
++export function installBundledPlugins(profile: string, source: string, log?: (line: string) => void): boolean {
++  if (!existsSync(source)) return false
++  const plugins = listBundledPlugins(source)
++  if (plugins.length === 0) return false
++  let changed = false
++  for (const plugin of plugins) {
++    const target = join(profile, 'node_modules', ...plugin.name.split('/'))
++    const wanted = contentFingerprint(plugin.directory)
++    const current = existsSync(target) ? contentFingerprint(target) : undefined
++    if (current !== undefined && wanted !== undefined && current === wanted) continue
++    try {
++      if (existsSync(target)) rmSync(target, { recursive: true, force: true })
++      mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
++      cpSync(plugin.directory, target, { recursive: true })
++      log?.(`bundled plugin ${plugin.name}@${plugin.version}: ${current ?? 'absent'} -> ${wanted ?? 'unknown'}`)
++      changed = true
++    } catch (error) {
++      log?.(`bundled plugin ${plugin.name} refresh failed: ${String(error)}`)
++    }
++  }
++  if (addToProfileBundles(profile, plugins.map(plugin => plugin.name))) changed = true
++  return changed
++}
+diff --git a/apps/desktop/src/project-manager.ts b/apps/desktop/src/project-manager.ts
+index af7804e1..af483852 100644
+--- a/apps/desktop/src/project-manager.ts
++++ b/apps/desktop/src/project-manager.ts
+@@ -27,6 +27,7 @@ import {
+ } from '@deepseek-ai/dsh-app-boot'
+ import { migrateDesktopProfileLinks } from './profile-packages.ts'
+ import { cleanProfileCorePackages } from './profile-core-cleanup.ts'
++import { installBundledPlugins } from './bundled-plugins.ts'
+ 
+ const PROJECT_NAME = '@deepseek-ai/dsh-desktop-runtime'
+ const DSH_PACKAGE = '@deepseek-ai/dsh'
+@@ -90,6 +91,9 @@ export class DesktopProjectManager {
+       migrateProfileSettings(this.paths.profile)
+       migrateDesktopProfileLinks(this.paths.profile)
+       createPluginProfile(this.paths.profile)
++      // First-party plugins ship inside the application (resources/plugins); materialize them into
++      // the profile as real directories and refresh any copy whose content changed.
++      installBundledPlugins(this.paths.profile, join(process.resourcesPath, 'plugins'))
+     })
+   }
+ 

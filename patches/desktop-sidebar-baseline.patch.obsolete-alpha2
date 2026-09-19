@@ -1,0 +1,30 @@
+diff --git a/apps/desktop/src/shell-ui.ts b/apps/desktop/src/shell-ui.ts
+index 4393898..29cb019 100644
+--- a/apps/desktop/src/shell-ui.ts
++++ b/apps/desktop/src/shell-ui.ts
+@@ -93,7 +93,9 @@ function shellBarCss(options: ShellBarOptions): string {
+     body { padding-top: ${String(SHELL_BAR_HEIGHT)}px !important; box-sizing: border-box !important; }
+     #__dsh_shell_bar {
+       position: fixed; top: 0; left: 0; right: 0; height: ${String(SHELL_BAR_HEIGHT)}px;
+-      display: flex; align-items: center; padding: 0 12px;
++      /* 20px on the left: the mark's own 2px padding plus its 18px box puts its ink on the same
++         column as the picker label below it and the kernel's workspace icons below that. */
++      display: flex; align-items: center; padding: 0 12px 0 20px;
+       -webkit-app-region: drag; user-select: none; pointer-events: auto;
+       background: var(--dsh-shell-bar-bg, transparent);
+       z-index: 2147483000;
+@@ -123,10 +125,12 @@ function shellBarCss(options: ShellBarOptions): string {
+     }
+     [class*="_panelList"] { display: none !important; }
+ 
+-    /* Panel picker ("workspace ⌄"), merged into the row that already carries the title. */
++    /* Panel picker ("workspace ⌄"), merged into the row that already carries the title.
++       That row's own content starts at 16px, so the -6px margin is what lands this label on the
++       same 20px column as the brand mark above it and the kernel's workspace icons below it. */
+     #__dsh_panel_picker {
+       position: relative; display: inline-flex; align-items: center; gap: 6px;
+-      -webkit-app-region: no-drag; cursor: pointer; padding: 5px 10px; margin-left: -10px; border-radius: 8px;
++      -webkit-app-region: no-drag; cursor: pointer; padding: 5px 10px; margin-left: -6px; border-radius: 8px;
+       font: 600 14px/1 "Segoe UI", system-ui, sans-serif; color: var(--dsw-alias-label-primary, #111);
+       user-select: none;
+     }

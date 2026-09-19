@@ -1,0 +1,399 @@
+diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
+index e4be343c..c6c5b334 100644
+--- a/apps/desktop/src/host-process.ts
++++ b/apps/desktop/src/host-process.ts
+@@ -75,6 +75,7 @@ export class DesktopHostProcess {
+   })
+   private exitPromise: Promise<void> | undefined
+   private stderr = ''
++  private exitCode: number | undefined
+   private failureReported = false
+   private stopping = false
+   private shutdownCompleted = false
+@@ -105,6 +106,26 @@ export class DesktopHostProcess {
+     private readonly packageManager?: { readonly pnpm: string; readonly nodeBin: string },
+   ) {}
+ 
++  /**
++   * Start this child once and await its Web application URL.
++   * @returns Ready facts supplied by the child after application startup.
++   */
++  /**
++   * Facts about a failed child for the recovery dialog: its exit code and the tail of its stderr.
++   *
++   * The failure message already carries the reason; this only adds what a screenshot has to show
++   * for the report to be actionable.
++   * @returns Multi-line, copy-pasteable diagnostics, or an empty string while the child is alive.
++   */
++  diagnostics(): string {
++    if (this.exitCode === undefined && this.stderr === '') return ''
++    const tail = this.stderr.trim().split('\n').slice(-8).join('\n')
++    return [
++      this.exitCode === undefined ? '退出码: （未报告；后端可能仍被占用）' : `退出码: ${String(this.exitCode)}`,
++      tail === '' ? 'stderr 末尾: （空）' : `stderr 末尾:\n${tail}`,
++    ].join('\n')
++  }
++
+   /**
+    * Start this child once and await its Web application URL.
+    * @returns Ready facts supplied by the child after application startup.
+@@ -151,6 +172,7 @@ export class DesktopHostProcess {
+     child.once('error', (error) => { this.fail(error) })
+     this.exitPromise = new Promise<void>((resolve) => {
+       child.once('close', (code) => {
++        this.exitCode = code === null ? undefined : code
+         const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
+         if (code !== 0 && code !== null) this.fail(new Error(`dsh desktop host exited with ${String(code)}${suffix}`))
+         else this.fail(new Error(`dsh desktop host stopped${suffix}`))
+diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
+index 03e6f29a..296d96cb 100644
+--- a/apps/desktop/src/locale.ts
++++ b/apps/desktop/src/locale.ts
+@@ -86,6 +86,8 @@ export const en = {
+   mandatoryCopyFailed: 'Copy failed. Select and copy the address below manually.',
+   mandatoryAddress: 'Download address',
+   mandatoryNotification: 'Return to the application to confirm installation and restart.',
++  trayOpen: 'Open DeepSeek Harness',
++  trayQuit: 'Quit',
+ } as const
+ 
+ /** Every Desktop locale supplies the complete English key set. */
+@@ -177,6 +179,8 @@ export const zh = {
+   mandatoryCopyFailed: '复制失败，请手动选择下方地址复制。',
+   mandatoryAddress: '下载地址',
+   mandatoryNotification: '返回应用确认安装并重启。',
++  trayOpen: '打开 DeepSeek Harness',
++  trayQuit: '退出',
+ } as const satisfies DesktopMessages
+ 
+ /** Locale payload exposed to the Desktop-owned renderer. */
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index d5bfb1e0..861215ab 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -17,6 +17,8 @@ import {
+   shell,
+   type IpcMainInvokeEvent,
+   type MenuItemConstructorOptions,
++  type Tray,
++  type WebContents,
+ } from 'electron'
+ import { resolveDesktopPaths } from './paths.ts'
+ import { DesktopProjectManager } from './project-manager.ts'
+@@ -39,11 +41,73 @@ import { DesktopMandatoryUpdateWindow } from './mandatory-update-window.ts'
+ import { DesktopPolicyTestAuth } from './policy-test-auth.ts'
+ import { DesktopUpdateDialog, type UpdateDialogOptions } from './update-dialog.ts'
+ import { readDesktopRuntime } from './runtime-tree.ts'
++import { createShellTray, shellWindowIcon } from './shell-ui.ts'
+ 
+ let focusPrimaryWindow = (): void => {}
+ let stopForRecovery = async (): Promise<void> => {}
+ let shuttingDown = false
+ let windowsLanguage: string | undefined
++/** Notification-area icon owned by the shell; while it exists the application stays resident. */
++let shellTray: Tray | undefined
++/** Exit code and stderr tail of the last backend that failed, read before its host is released. */
++let lastBackendDiagnostics = ''
++/** Install-location facts appended to every fatal report; assigned once the paths are resolved. */
++let fatalLocationFacts = (): string => ''
++
++/** Persistent partition owned by the in-app Chat panel; the user's web sign-in lives here. */
++const CHAT_PARTITION = 'persist:dsh-fenggu-chat'
++/** Site the in-app Chat panel may load; its sign-in flow stays on this domain family. */
++const CHAT_SITE = 'deepseek.com'
++/** The site refuses a client whose user agent says "Electron"; report the bundled Chromium. */
++const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
++  + `(KHTML, like Gecko) Chrome/${process.versions.chrome ?? '120.0.0.0'} Safari/537.36`
++
++/** Whether a URL is inside the single site the in-app Chat panel is allowed to reach. */
++function isChatUrl(url: string): boolean {
++  try {
++    const parsed = new URL(url)
++    if (parsed.protocol !== 'https:') return false
++    return parsed.hostname === CHAT_SITE || parsed.hostname.endsWith(`.${CHAT_SITE}`)
++  } catch {
++    return false
++  }
++}
++
++/**
++ * Pin every `<webview>` of one window to the Chat partition, and refuse anything else.
++ * @param contents - Renderer allowed to embed the Chat panel.
++ */
++function lockDownChatGuests(contents: WebContents): void {
++  contents.on('will-attach-webview', (event, webPreferences, params) => {
++    delete webPreferences.preload
++    webPreferences.nodeIntegration = false
++    webPreferences.contextIsolation = true
++    webPreferences.sandbox = true
++    webPreferences.webSecurity = true
++    const src = typeof params.src === 'string' ? params.src : ''
++    if (params.partition !== CHAT_PARTITION || (src !== '' && !isChatUrl(src))) event.preventDefault()
++  })
++}
++
++/**
++ * Chat guests get a browser user agent and may never navigate outside the site. `webviewTag` is
++ * enabled for the application window alone and that window rejects guests outside the Chat
++ * partition, so every webview in this process is a Chat guest.
++ */
++function installChatGuestPolicy(): void {
++  app.on('web-contents-created', (_event, contents) => {
++    if (contents.getType() !== 'webview') return
++    try { contents.session.setUserAgent(BROWSER_USER_AGENT) } catch { /* session already gone */ }
++    contents.setUserAgent(BROWSER_USER_AGENT)
++    contents.setWindowOpenHandler(({ url }) => {
++      if (isChatUrl(url)) void shell.openExternal(url)
++      return { action: 'deny' }
++    })
++    contents.on('will-navigate', (event, url) => {
++      if (!isChatUrl(url)) event.preventDefault()
++    })
++  })
++}
+ 
+ function currentDesktopLocale(): ReturnType<typeof resolveDesktopLocale> {
+   return resolveDesktopLocale(windowsLanguage ?? app.getLocale())
+@@ -64,7 +128,12 @@ const recovery = new DesktopFatalRecovery({
+ function reportFatal(error: unknown): void {
+   console.error(error)
+   if (shuttingDown) return
+-  void recovery.report(error).catch((failure: unknown) => { console.error(failure); app.exit(1) })
++  // The recovery dialog shortens long reports to their last lines, so the reason stays first and
++  // the install-location facts go last: whatever survives the cut still tells the user where the
++  // runtime lives and what the backend printed before it stopped.
++  const location = fatalLocationFacts()
++  const reported = location === '' ? error : new Error(`${desktopErrorState(error).message}\n\n${location}`)
++  void recovery.report(reported).catch((failure: unknown) => { console.error(failure); app.exit(1) })
+ }
+ 
+ protocol.registerSchemesAsPrivileged([{
+@@ -108,13 +177,15 @@ function developmentHostInspectPort(enabled: boolean): number | undefined {
+   return port
+ }
+ 
+-function createWindow(preload: string, show = false, primary = false): BrowserWindow {
++function createWindow(preload: string, show = false, primary = false, embed = false): BrowserWindow {
++  const icon = shellWindowIcon()
+   const window = new BrowserWindow({
+     width: 1280,
+     height: 840,
+     minWidth: 880,
+     minHeight: 600,
+     show,
++    ...(icon === undefined ? {} : { icon }),
+     ...(process.platform === 'win32' && primary ? {
+       titleBarStyle: 'hidden' as const,
+       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: nativeTheme.shouldUseDarkColors ? '#1b1b1c' : '#f9fafb',
+@@ -137,8 +208,12 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+       contextIsolation: true,
+       sandbox: true,
+       webSecurity: true,
++      // The Chat panel hosts the DeepSeek web client in a <webview>. Only the application window
++      // needs the tag, and lockDownChatGuests below narrows every guest it may attach.
++      webviewTag: embed,
+     },
+   })
++  if (embed) lockDownChatGuests(window.webContents)
+   window.webContents.setWindowOpenHandler(({ url }) => {
+     if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
+     return { action: 'deny' }
+@@ -183,6 +258,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+ }
+ 
+ async function main(): Promise<void> {
++  installChatGuestPolicy()
+   const journalDirectory = process.env.DSH_DESKTOP_UPDATE_JOURNAL_DIR
+   const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
+   const resources = runtimeResources()
+@@ -220,6 +296,14 @@ async function main(): Promise<void> {
+   }
+   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
+   const applicationUrl = `${SCHEME}://app/`
++  // Facts a screenshot of the recovery dialog has to carry: which runtime and profile the shell
++  // booted, where it serves the application, and what the backend printed on its way out.
++  fatalLocationFacts = (): string => [
++    `运行时目录: ${resources.dsh}`,
++    `配置目录: ${activeProject}`,
++    `服务地址: ${applicationUrl}（应用内协议，外壳不监听端口）`,
++    ...(lastBackendDiagnostics === '' ? [] : [lastBackendDiagnostics]),
++  ].join('\n')
+   let hostUrl: string | undefined
+   let hostCookie: string | undefined
+   let injections: readonly unknown[] = []
+@@ -247,11 +331,18 @@ async function main(): Promise<void> {
+   }
+   const backend = new DesktopBackendController((onFailure) => {
+     const hostInspectPort = developmentHostInspectPort(development)
++    let hostRef: DesktopHostProcess | undefined
+     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
+-      hostInspectPort, process.env, onFailure,
++      hostInspectPort, process.env, (error: Error) => {
++        // The controller releases the host as soon as it fails, and the recovery dialog is rendered
++        // after that, so read the child's own facts while the object still exists.
++        if (hostRef !== undefined) lastBackendDiagnostics = hostRef.diagnostics()
++        onFailure(error)
++      },
+       development ? join(app.getAppPath(), '.desktop-build', 'targets', `${process.platform === 'darwin' ? 'mac' : 'win'}-${process.arch}`, 'runtime', 'primary-runtime')
+         : join(process.resourcesPath, 'runtime', 'primary-runtime'),
+       development ? 'link' : 'runtime', resources)
++    hostRef = host
+     return {
+       start: async () => {
+         const ready = await host.start()
+@@ -272,6 +363,7 @@ async function main(): Promise<void> {
+     }
+   }, (state) => {
+     if (state.phase === 'error') reportFatal(new Error(state.message))
++    else lastBackendDiagnostics = ''
+   })
+ 
+   const updateErrors = new WeakMap<DesktopUpdateState, Promise<void>>()
+@@ -573,6 +665,8 @@ async function main(): Promise<void> {
+     updateSchedule.dispose()
+     powerMonitor.off('resume', automaticCheck)
+     updates.dispose()
++    shellTray?.destroy()
++    shellTray = undefined
+   })
+ 
+   app.setAboutPanelOptions({
+@@ -605,6 +699,17 @@ async function main(): Promise<void> {
+     label: darwin ? app.name : currentDesktopLocale().messages.application,
+     submenu: applicationItems(),
+   }, ...platformMenus]))
++  // The shell owns the lifecycle through the notification area: closing the window keeps the
++  // backend and its tasks running, and the icon is the only way back or out. Its two entries
++  // mirror the two commands the shell actually owns; plugin administration lives in the
++  // application's own plugin page and updates in the application's update prompt.
++  shellTray = createShellTray({
++    tooltip: app.name,
++    openLabel: messages.trayOpen,
++    quitLabel: messages.trayQuit,
++    onOpen: () => { focusPrimaryWindow() },
++    onQuit: () => { app.quit() },
++  })
+ 
+   if (process.platform === 'win32') {
+     ipcMain.handle(DESKTOP_IPC.windowsMenu, (event, name: unknown, x: unknown, y: unknown) => {
+@@ -656,8 +761,16 @@ async function main(): Promise<void> {
+   }
+ 
+   const createMainWindow = (): BrowserWindow => {
+-    const window = createWindow(appPreload, true, true)
++    const window = createWindow(appPreload, true, true, true)
+     mainWindow = window
++    // Closing the window hides it instead of ending the application: the notification-area icon
++    // and the running tasks stay alive until the tray's Quit entry, the installer's handoff, or
++    // the recovery dialog ends the process.
++    window.on('close', (event) => {
++      if (quitting || shuttingDown || shellTray === undefined) return
++      event.preventDefault()
++      window.hide()
++    })
+     window.on('focus', automaticCheck)
+     window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
+     window.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+@@ -694,7 +807,11 @@ async function main(): Promise<void> {
+     if (BrowserWindow.getAllWindows().length === 0) focusPrimaryWindow()
+   })
+   app.on('window-all-closed', () => {
+-    if (process.platform !== 'darwin') app.quit()
++    if (process.platform === 'darwin') return
++    // With the notification-area icon present the application stays resident and the icon owns
++    // the lifecycle, so losing the last window is not a reason to stop the backend.
++    if (shellTray !== undefined) return
++    app.quit()
+   })
+   app.on('before-quit', (event) => {
+     shuttingDown = true
+@@ -718,6 +835,14 @@ async function main(): Promise<void> {
+   mainWindow = createMainWindow()
+   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
+   if (typeof manifest !== 'object' || manifest === null) throw new Error('desktop policy: invalid application manifest')
++  // The kernel's plugin surface reads the shell's version from the environment, and the packaged
++  // version is only ever the bundled kernel's version, so the release label this installer was
++  // published under is what a plugin should report. Publish it before the Host is spawned and
++  // inherits this environment.
++  const releaseLabel = (manifest as { dshDesktopReleaseLabel?: unknown }).dshDesktopReleaseLabel
++  process.env.DSH_APP_VERSION = typeof releaseLabel === 'string' && releaseLabel !== ''
++    ? releaseLabel
++    : app.getVersion()
+   const developmentPolicy = app.isPackaged ? undefined : process.env.DSH_DESKTOP_MANDATORY_UPDATE_CONFIG
+   const policyInput: unknown = app.isPackaged
+     ? ('dshMandatoryUpdatePolicy' in manifest ? manifest.dshMandatoryUpdatePolicy : undefined)
+diff --git a/apps/desktop/src/shell-ui.ts b/apps/desktop/src/shell-ui.ts
+new file mode 100644
+index 00000000..1c81c195
+--- /dev/null
++++ b/apps/desktop/src/shell-ui.ts
+@@ -0,0 +1,69 @@
++/**
++ * Shell-owned chrome that the official desktop layer does not provide: the packaged window icon
++ * and the notification-area icon that keeps the application resident after its window closes.
++ *
++ * As of dsh 0.1.6-alpha.2 the official desktop layer owns the rest of the window chrome itself:
++ * `main.ts` sets `titleBarStyle: 'hidden'` with the caption height from `windows-layout.ts`, the
++ * application document repaints that strip through the `windowsAppearance` IPC, and the client
++ * lays its sidebar out for it from the `data-windows-titlebar` attribute
++ * (`packages/client/ui-sidebar/src/client/SidebarRoot.module.css`). Painting the same strip from
++ * here would fight that code, so this module deliberately keeps no copy of it.
++ */
++
++import { existsSync } from 'node:fs'
++import { join } from 'node:path'
++import {
++  Menu,
++  nativeImage,
++  Tray,
++  type NativeImage,
++} from 'electron'
++
++function shellAsset(name: string): string | undefined {
++  const path = join(process.resourcesPath, 'assets', name)
++  return existsSync(path) ? path : undefined
++}
++
++/** Window and taskbar icon shipped beside the application, when the packaging step provided one. */
++export function shellWindowIcon(): string | undefined {
++  return shellAsset('app-icon.png')
++}
++
++function shellTrayImage(): NativeImage | undefined {
++  for (const name of ['tray-icon.png', 'app-icon.png']) {
++    const path = shellAsset(name)
++    if (path === undefined) continue
++    const image = nativeImage.createFromPath(path)
++    if (!image.isEmpty()) return image
++  }
++  return undefined
++}
++
++/** Options for {@link createShellTray}. */
++export interface ShellTrayOptions {
++  readonly tooltip: string
++  readonly openLabel: string
++  readonly quitLabel: string
++  readonly onOpen: () => void
++  readonly onQuit: () => void
++}
++
++/**
++ * Install the notification-area icon that owns the application lifecycle while the window is hidden.
++ * @param options - Localized labels and the two lifecycle callbacks.
++ * @returns The icon, or undefined when no icon asset was packaged or the platform cannot show one.
++ */
++export function createShellTray(options: ShellTrayOptions): Tray | undefined {
++  const image = shellTrayImage()
++  if (image === undefined) return undefined
++  const tray = new Tray(image)
++  tray.setToolTip(options.tooltip)
++  tray.setContextMenu(Menu.buildFromTemplate([
++    { label: options.openLabel, click: options.onOpen },
++    { type: 'separator' },
++    { label: options.quitLabel, click: options.onQuit },
++  ]))
++  // A left click on the icon is the fastest way back to a hidden window.
++  tray.on('click', options.onOpen)
++  return tray
++}

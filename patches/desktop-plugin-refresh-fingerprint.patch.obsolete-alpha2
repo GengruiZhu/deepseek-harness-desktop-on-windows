@@ -1,0 +1,76 @@
+diff --git a/apps/desktop/src/project-manager.ts b/apps/desktop/src/project-manager.ts
+index 06aecf4..47d8aa2 100644
+--- a/apps/desktop/src/project-manager.ts
++++ b/apps/desktop/src/project-manager.ts
+@@ -2,6 +2,7 @@
+ 
+ import { valid } from 'semver'
+ import { spawn } from 'node:child_process'
++import { createHash } from 'node:crypto'
+ import {
+   cpSync,
+   existsSync,
+@@ -105,6 +106,43 @@ function bundledPluginManifest(directory: string): BundledPlugin | undefined {
+   }
+ }
+ 
++/**
++ * Content fingerprint of one plugin package: the relative path, byte length and SHA-256 of every
++ * file inside it.
++ *
++ * The profile copy is compared against this instead of the manifest version alone, because a
++ * plugin that keeps its version number while its sources change would otherwise stay stale in
++ * every profile that an earlier build materialized.
++ * @param directory - Plugin package directory.
++ * @returns The fingerprint, or undefined when the directory cannot be walked; the caller then
++ * falls back to the manifest version, which is all the previous implementation looked at.
++ */
++function pluginFingerprint(directory: string): string | undefined {
++  const entries: string[] = []
++  const walk = (current: string, prefix: string): void => {
++    const children = readdirSync(current, { withFileTypes: true })
++      .sort((left, right) => left.name.localeCompare(right.name))
++    for (const child of children) {
++      if (child.name.startsWith('.')) continue
++      const relative = prefix === '' ? child.name : `${prefix}/${child.name}`
++      const absolute = join(current, child.name)
++      if (child.isDirectory()) {
++        walk(absolute, relative)
++        continue
++      }
++      if (!child.isFile()) continue
++      const body = readFileSync(absolute)
++      entries.push(`${relative} ${String(body.byteLength)} ${createHash('sha256').update(body).digest('hex')}`)
++    }
++  }
++  try {
++    walk(directory, '')
++    return createHash('sha256').update(entries.join('\n')).digest('hex')
++  } catch {
++    return undefined
++  }
++}
++
+ function errorOf(reason: unknown, fallback: string): Error {
+   return reason instanceof Error ? reason : new Error(fallback)
+ }
+@@ -376,11 +414,18 @@ export class DesktopProjectManager {
+       if (plugin === undefined) continue
+       const to = join(this.paths.profile, 'node_modules', ...plugin.name.split('/'))
+       const current = bundledPluginManifest(to)
+-      if (current?.version !== plugin.version) {
++      const shipped = pluginFingerprint(from)
++      const present = existsSync(to) ? pluginFingerprint(to) : undefined
++      // Refresh on a content change, not only on a version bump: this plugin keeps version
++      // 0.1.x across source changes, so a profile materialized by an earlier build would
++      // otherwise keep serving its stale copy forever.
++      if (current?.version !== plugin.version || (shipped !== undefined && present !== shipped)) {
+         removeOwnedDirectory(to)
+         mkdirSync(dirname(to), { recursive: true, mode: 0o700 })
+         cpSync(from, to, { recursive: true })
+         changed = true
++        console.log(`desktop project: refreshed bundled plugin ${plugin.name}`
++          + ` (fingerprint ${present ?? 'absent'} -> ${shipped ?? 'unverifiable'})`)
+       }
+       installed.push(plugin)
+     }

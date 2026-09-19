@@ -1,0 +1,48 @@
+diff --git a/apps/desktop/electron-builder.config.mjs b/apps/desktop/electron-builder.config.mjs
+index 752a3c4..9173d2e 100644
+--- a/apps/desktop/electron-builder.config.mjs
++++ b/apps/desktop/electron-builder.config.mjs
+@@ -52,10 +52,22 @@ export function createElectronBuilderConfig(
+   }
+   const update = unsigned ? undefined : resolveDesktopAutoUpdateConfig(env, resolvedPlatform, resolvedArch)
+   const buildPaths = desktopTargetBuildPaths(resolveDesktopBuildTarget(env, hostPlatform, hostArch))
++  // The packaging chain strips every DSH_DESKTOP_WINDOWS_* name (they carry signing inputs), so the
++  // icon arrives under its own name and falls back to the shell asset directory.
++  const windowsIcon = env.DSH_DESKTOP_ICON
++    ?? (env.DSH_DESKTOP_EXTRA_ASSETS === undefined ? undefined : join(env.DSH_DESKTOP_EXTRA_ASSETS, 'app-icon.png'))
++  // Shell-owned resources are optional: a stock checkout packages none of them.
++  const extraResources = [{ from: buildPaths.runtime, to: 'runtime' }]
++  if (env.DSH_DESKTOP_EXTRA_ASSETS !== undefined) {
++    extraResources.push({ from: env.DSH_DESKTOP_EXTRA_ASSETS, to: 'assets' })
++  }
++  if (env.DSH_DESKTOP_PLUGINS_DIR !== undefined) {
++    extraResources.push({ from: env.DSH_DESKTOP_PLUGINS_DIR, to: 'plugins' })
++  }
+   return {
+     appId,
+-    productName: 'DeepSeek Harness',
+-    artifactName: 'deepseek-harness-${version}-${os}-${arch}.${ext}',
++    productName: env.DSH_DESKTOP_PRODUCT_NAME ?? 'DeepSeek Harness',
++    artifactName: env.DSH_DESKTOP_ARTIFACT_NAME ?? 'deepseek-harness-${version}-${os}-${arch}.${ext}',
+     directories: { output: unsigned ? join(buildPaths.root, 'unsigned-artifacts') : buildPaths.artifacts },
+     asar: true,
+     files: [
+@@ -73,9 +85,7 @@ export function createElectronBuilderConfig(
+       '**/spawn-helper',
+       '**/@vscode/ripgrep/bin/rg',
+     ],
+-    extraResources: [
+-      { from: buildPaths.runtime, to: 'runtime' },
+-    ],
++    extraResources,
+     mac: {
+       category: 'public.app-category.developer-tools',
+       identity: macOSSigning?.signingIdentity,
+@@ -104,6 +114,7 @@ export function createElectronBuilderConfig(
+     },
+     win: {
+       forceCodeSigning: !unsigned,
++      ...(windowsIcon === undefined ? {} : { icon: windowsIcon }),
+       signtoolOptions: {
+         sign: windowsSigner,
+         signingHashAlgorithms: ['sha256'],

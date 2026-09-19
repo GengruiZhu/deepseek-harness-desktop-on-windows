@@ -1,0 +1,13 @@
+{
+  "$comment": [
+    "官方内核的引用记录：壳子是我们自己的，内核直接引用官方仓库的某个 tag。",
+    "vendor/deepseek-harness 是官方仓库的 submodule，钉在下面这个 commit 上；",
+    "升级内核 = 改这个文件 + 把 submodule 挪到新 tag，然后照常打包。",
+    "scripts/kernel-version.mjs 会读它（并在 submodule 已检出时校验 commit 是否对得上）。"
+  ],
+  "repo": "https://github.com/deepseek-ai/deepseek-harness.git",
+  "tag": "dsh-v0.1.6-alpha.2",
+  "commit": "ddefc45fbc7f8e46dd73185e68295696d1297887",
+  "kernel": "0.1.6-alpha.2",
+  "appVersion": "0.9.1-alpha2"
+}

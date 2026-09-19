@@ -1,0 +1,128 @@
+diff --git a/apps/desktop/src/project-manager.ts b/apps/desktop/src/project-manager.ts
+index c430f1a..06aecf4 100644
+--- a/apps/desktop/src/project-manager.ts
++++ b/apps/desktop/src/project-manager.ts
+@@ -3,6 +3,7 @@
+ import { valid } from 'semver'
+ import { spawn } from 'node:child_process'
+ import {
++  cpSync,
+   existsSync,
+   fsyncSync,
+   ftruncateSync,
+@@ -87,6 +88,23 @@ const VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+_-]*$/u
+ const MAX_PNPM_DIAGNOSTIC_BYTES = 64 * 1024
+ const DESKTOP_REGISTRY = 'https://registry.npmjs.org/'
+ 
++/** One plugin package the application itself carries. */
++interface BundledPlugin {
++  readonly name: string
++  readonly version: string
++}
++
++function bundledPluginManifest(directory: string): BundledPlugin | undefined {
++  try {
++    const value: unknown = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
++    if (!isRecord(value) || typeof value.name !== 'string' || typeof value.version !== 'string') return undefined
++    if (!PACKAGE_NAME_PATTERN.test(value.name) || VERSION_PATTERN.test(value.version) === false) return undefined
++    return { name: value.name, version: value.version }
++  } catch {
++    return undefined
++  }
++}
++
+ function errorOf(reason: unknown, fallback: string): Error {
+   return reason instanceof Error ? reason : new Error(fallback)
+ }
+@@ -228,10 +246,12 @@ export class DesktopProjectManager {
+   /**
+    * @param paths - Electron-owned package state and reserved desktop profile paths.
+    * @param runtime - absolute bundled Node.js and pnpm entry paths.
++   * @param bundledPlugins - directory of first-party plugin packages carried by this installation.
+    */
+   constructor(
+     readonly paths: DesktopPaths,
+     readonly runtime: DesktopRuntimeExecutables,
++    readonly bundledPlugins: string | undefined = undefined,
+   ) {}
+ 
+   /** Read the active desktop plugin inventory. */
+@@ -312,7 +332,11 @@ export class DesktopProjectManager {
+       const target = this.readRuntime()
+       this.descriptor = target
+       const previous = readDesktopProfileState(this.paths.profile)
+-      if (!existsSync(this.pendingPackages) && previous?.runtimeId === desktopRuntimeId(target)
++      if (previous === undefined) createPluginProfile(this.paths.profile)
++      // First-party plugins ship with the application, so they are materialized before the first
++      // validation pass instead of being installed from a registry on a user's machine.
++      const bundled = this.installBundledPlugins()
++      if (!bundled && !existsSync(this.pendingPackages) && previous?.runtimeId === desktopRuntimeId(target)
+         && previous.lockHash === desktopPluginLockHash(this.paths.profile)
+         && (this.runtime.profileResolution === 'runtime' || (previous.links.length === target.sharedPackages.length
+           && previous.links.every(link => existsSync(link.target)
+@@ -320,12 +344,64 @@ export class DesktopProjectManager {
+           && realpathSync.native(link.target) === realpathSync.native(join(this.runtime.dsh, 'node_modules', link.name)))))) {
+         return false
+       }
+-      if (previous === undefined) createPluginProfile(this.paths.profile)
+       await this.reconcileProfile(this.paths.profile, previous)
+       return true
+     })
+   }
+ 
++  /**
++   * Materialize the first-party plugins this installation carries into the active profile.
++   *
++   * The kernel resolves a profile bundle from the profile's own `node_modules`, and the Desktop
++   * profile rejects linked package directories, so a plugin that has to exist on a fresh
++   * installation is copied in as a real directory and appended to the profile's bundle list.
++   * @returns Whether the profile changed and therefore needs a validation pass.
++   */
++  installBundledPlugins(): boolean {
++    const source = this.bundledPlugins
++    if (source === undefined || !existsSync(source)) return false
++    let directories: string[]
++    try {
++      directories = readdirSync(source, { withFileTypes: true })
++        .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
++        .map(entry => entry.name)
++    } catch {
++      return false
++    }
++    let changed = false
++    const installed: BundledPlugin[] = []
++    for (const name of directories) {
++      const from = join(source, name)
++      const plugin = bundledPluginManifest(from)
++      if (plugin === undefined) continue
++      const to = join(this.paths.profile, 'node_modules', ...plugin.name.split('/'))
++      const current = bundledPluginManifest(to)
++      if (current?.version !== plugin.version) {
++        removeOwnedDirectory(to)
++        mkdirSync(dirname(to), { recursive: true, mode: 0o700 })
++        cpSync(from, to, { recursive: true })
++        changed = true
++      }
++      installed.push(plugin)
++    }
++    if (installed.length === 0) return changed
++    return this.recordBundledPlugins(installed) || changed
++  }
++
++  private recordBundledPlugins(plugins: readonly BundledPlugin[]): boolean {
++    const manifest = projectManifest(this.paths.profile)
++    const bundles = manifest.dsh.profile.bundles
++    const missing = [...new Set(plugins.map(plugin => plugin.name))]
++      .filter(name => !bundles.includes(name))
++      .sort((left, right) => left.localeCompare(right))
++    if (missing.length === 0) return false
++    writeJson(join(this.paths.profile, 'package.json'), {
++      ...manifest,
++      dsh: { ...manifest.dsh, profile: { ...manifest.dsh.profile, bundles: [...bundles, ...missing] } },
++    } satisfies DesktopProjectManifest)
++    return true
++  }
++
+   /** Modify the current profile while its backend is stopped; failures retain partial changes. */
+   async mutate(mutation: DesktopProjectMutation, hooks: DesktopProjectHooks): Promise<void> {
+     await this.withLock(async () => {

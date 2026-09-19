@@ -1,0 +1,45 @@
+diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
+index 1b22293..a4e8abf 100644
+--- a/apps/desktop/scripts/prepare-runtime.ts
++++ b/apps/desktop/scripts/prepare-runtime.ts
+@@ -7,7 +7,6 @@ import { chmod, readFile } from 'node:fs/promises'
+ import { createRequire } from 'node:module'
+ import { dirname, join } from 'node:path'
+ import { pipeline } from 'node:stream/promises'
+-import extractZip from 'extract-zip'
+ import { extract } from 'tar'
+ import { resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
+ 
+@@ -36,6 +35,23 @@ async function download(url: string, path: string): Promise<void> {
+   writeFileSync(path, new Uint8Array(await response.arrayBuffer()), { mode: 0o600 })
+ }
+ 
++/**
++ * Extract a Windows ZIP with the bsdtar that ships with Windows.
++ *
++ * extract-zip 2.0.1 stalls partway through the Node.js Windows distribution archive on this
++ * build host (it stops after a handful of entries and never settles), while the bundled
++ * `tar.exe` unpacks the identical archive in under a second.
++ * @param archive - Absolute path of the ZIP to extract.
++ * @param destination - Absolute directory that receives the archive contents.
++ */
++async function extractWindowsArchive(archive: string, destination: string): Promise<void> {
++  const result = spawnSync('tar', ['-xf', archive, '-C', destination], { encoding: 'utf8' })
++  if (result.error !== undefined || result.status !== 0) {
++    const detail = result.error?.message ?? result.stderr.trim()
++    throw new Error(`desktop runtime: tar could not extract ${archive}: ${detail === '' ? `exit ${String(result.status)}` : detail}`)
++  }
++}
++
+ async function prepareNode(platform: RuntimePlatform, arch: RuntimeArch): Promise<void> {
+   const extension = platform === 'win' ? 'zip' : 'tar.gz'
+   const folder = `node-v${NODE_VERSION}-${platform}-${arch}`
+@@ -55,7 +71,7 @@ async function prepareNode(platform: RuntimePlatform, arch: RuntimeArch): Promis
+   const extraction = BUILD_PATHS.nodeExtract
+   rmSync(extraction, { recursive: true, force: true })
+   mkdirSync(extraction, { recursive: true })
+-  if (platform === 'win') await extractZip(archive, { dir: extraction })
++  if (platform === 'win') await extractWindowsArchive(archive, extraction)
+   else await extract({ cwd: extraction, file: archive })
+   const source = join(extraction, folder, platform === 'win' ? 'node.exe' : 'bin/node')
+   const destinationRoot = join(RUNTIME_ROOT, 'node')

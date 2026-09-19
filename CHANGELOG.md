@@ -1,6 +1,41 @@
 # DeepSeek Harness 桌面端 更新日志
 
-桌面壳（Electron 包装器）版本记录。安装包：`DeepSeek Harness Setup <ver>.exe`。
+桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
+
+## 0.9.1-alpha2 (2026-09-19)
+
+**改用官方 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 桌面壳**（内核 **0.1.6-alpha.2**；本仓库从此只做 Windows 打包 + 补丁）。
+
+- **构建路径换轨**：不再用自研薄壳，改为把官方仓库作为 submodule（`vendor/deepseek-harness`，钉 `dsh-v0.1.6-alpha.2` / `ddefc45`）+ `patches/` 补丁；`scripts/build-desktop.ps1` 一条命令走完「校验 lock → 依次应用补丁 → pnpm install → 官方 Windows 打包流程」
+- **补丁清单**（4 个活跃，其余已 `.obsolete-alpha2` 退役）：
+  - `desktop-branding.alpha2`：productName / artifactName / release label 走 env；`DSH_DESKTOP_ICON` 覆盖 exe 图标；unsigned 构建不写强制更新策略；`compression: 'maximum'`；afterPack 精简 Electron locale（只留 `en-US` + `zh-CN`，48.3 MB → 1.15 MB）
+  - `desktop-first-party-plugins.alpha2`：新增 `bundled-plugins.ts`（按内容指纹刷新内置插件），上游只加 1 行 import + 1 行调用
+  - `desktop-runtime-extract.alpha2`：改用系统 bsdtar 解 Node zip
+  - `desktop-shell.alpha2`：托盘两项 + 关窗常驻、Chat webview（`persist:dsh-fenggu-chat`，只放行 `deepseek.com` 家族、普通 Chrome UA）、黑鲸鱼图标、失败诊断（运行时目录 / 配置目录 / 服务地址 / 退出码 / stderr 末尾）、`DSH_APP_VERSION` 注入
+- **顶栏 / 侧栏 / 启动页交给官方**：alpha.2 官方已把当年我们自己补的那一层原生实现（自绘顶栏、跟随页面取色、隐藏原生菜单条、应用内插件管理），继续叠旧 CSS 只会互相打架
+- **瘦身**：306,929,243 → **298,252,600 字节**（-8.7 MB / -2.83%），功能零改动；实测 `files` 负向 glob 剔 `.md` / `.d.ts` 无效，已从补丁里删掉、不留假动作
+- **桌面插件块改走官方 API**：用内核自带 `pluginManager`（`listBundles` / `setBundleEnabled` / `removeBundle` / `installBundle`）+ `layout.selectPanel("plugins")` 打开官方插件页；旧外壳仍回落 `window.dshDesktop.plugins`
+- **验收**（读产物 + 隔离 DSH_HOME 真机）：包身份与 `report.json` 一致；内核实测 `0.1.6-alpha.2`；`appId = com.gengruizhu.dsh`；无 `dshMandatoryUpdatePolicy`（离线不被官方策略服务挡住）；图标为黑鲸鱼且打包日志 0 条默认图标告警；关窗常驻（WM_CLOSE 后 8 秒进程仍存活）；设置页含「桌面插件」块、可跳官方插件页
+- 已知遗留：官方插件页看不到随包发布的 `ds_zhuzhu_use`（它不是内核定义的「安装提供型 bundle」，但插件本身加载正常）；unsigned 构建不带官方更新源，「检查更新」按官方逻辑报「暂无可用更新」
+- 交付报告：`work/alpha2-status.md`（构建日志 `werk/alpha2-build-*.log`、验收 `werk/alpha2-verify/*/report.json`，均不入库）
+- ⚠️ alpha 预发布：内核为 alpha 档，追求稳定请用 0.7.0。
+
+## 0.9.0-alpha1 (2026-09-17)
+
+**内核升级 0.1.5-rc.1 → 0.1.6-alpha.1 + 官方仓库引用 + 插件更名 + 宠物改为按需下载**（壳仍是我们自己的）。
+
+- **窗口顶栏重做**：去掉系统那条「淡蓝底 + 一长串标题」，改成自己画的一条 —— 隐藏系统标题栏、保留原生窗口按钮，底色**实时取界面侧栏的颜色**（浅色/深色主题都严丝合缝），左侧一个 18px 鲸鱼标记；侧栏里重复的「鲸鱼 + deepseek HARNESS」整行隐去（折叠按钮保留），工作区做成浮在灰底上的圆角白卡（Codex 那种观感）
+  - 侧栏顶部重排：品牌行 + 折叠按钮 + 两行「工作区 / Chat」全部收掉，改成 **「工作区 ⌄」下拉**（切换工作区 / Chat，和 Claude 那种一致）+ 右侧一个「＋」小图标（新会话，只留图标）；**点顶栏的鲸鱼 = 收起/展开侧栏**（原折叠按钮的功能挪到这里）；下拉菜单挂在浮层上（不再被侧栏那行的 `overflow:hidden` 裁掉），配色走内核主题变量，浅色/深色都跟着变
+- **可选子代理驱动改为按需下载**：设置里新增「**子代理**」块（就在「Agent 预设」下面）—— Codex CLI（377 MB）/ Claude Code SDK（221 MB）不进安装包，用到再下（下载 / 进度 / 取消 / 删除，断点不需要、6 秒下完），装到 `~/.dsh/profiles/web/node_modules/`（内核就在那儿解析这两个插件的依赖），并自动把插件的 profile bundle 行接上/摘掉。安装包 **316 MB → 157 MB**
+- **Agent 预设维护**：内核升级会改插件名 —— 0.1.5 的 `dsh-workflow-worker-thread` 在 0.1.6 已被 `dsh-workflow-ptc` 取代，老预设里那行会让**整个预设加载失败**（就是「加载失败 / cannot be resolved」那条）。新增一键修复：改名前先备份 `.bak-<时间戳>`，只动该动的那几行；驱动没装时把对应行 `disabled: true`，装好了再启用
+- **官方内核 0.1.6-alpha.1**（官方桌面版同档）；应用内「软件信息」显示的内核版本改为**运行时实读**，不再靠文案
+- **官方仓库按标准方式引用**：仓库新增 `vendor/deepseek-harness` submodule（钉在 `dsh-v0.1.6-alpha.1`），内核版本只认 `vendor/kernel.lock.json` —— 升级内核 = 改 lock + 挪 submodule，不再手写版本号；`scripts/kernel-version.mjs --verify` 会校验 submodule 的 commit 与 lock 是否一致
+- **自带插件更名 `dsh-fenggu` → `ds_zhuzhu_use`**（目录、包名、bundle 行、客户端 id、路由前缀 `/api/ds-zhuzhu-use/*`）。升级用户 profile 里的旧行由桌面壳自动清理，会话版本 / 平台用量令牌 / 内嵌 Chat 登录态**全部保留**（令牌文件自动迁移，Electron 分区名冻结）
+- **宠物资源不再进安装包**：两只宠物解包 120 MB / 压缩后 123 MB，对不用宠物的人是白付。改为**设置 → 宠物 → 宠物资源**里按需下载（下载 / 进度 / 取消 / 删除，断点续传），资源放在本仓库 `pet-assets` 分支，装到 `~/.dsh/pets/resources/<id>/`，与手工放进去的宠物同一条读取路径
+  - `pets/index.json` 是清单：**加新宠物只要传 zip + 加一行，不用发新版客户端**（拉不到清单时用内置表兜底，并会在界面上说明）
+  - 下载的目录带 `_installed.json` 标记：同名的手工宠物不会被覆盖，删除也只删自己装的
+- **官方 runtime 文件策略**：打包前去掉声明文件 / source map / 其它平台 prebuild（**-96.7 MB**，纯死重）；安装包 358 MB → **316 MB**
+- ⚠️ alpha 预发布：内核为 alpha 档，追求稳定请用 0.7.0。
 
 ## 0.8.1-rc.1 (2026-09-10)
 

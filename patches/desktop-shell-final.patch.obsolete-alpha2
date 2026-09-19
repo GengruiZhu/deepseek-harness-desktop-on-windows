@@ -1,0 +1,723 @@
+diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
+--- a/apps/desktop/src/host-process.ts
++++ b/apps/desktop/src/host-process.ts
+@@ -83,8 +83,21 @@ export class DesktopHostProcess {
+   })
+   private exitPromise: Promise<void> | undefined
+   private stderr = ''
++  private exitCode: number | undefined
+   private failureReported = false
+ 
++  /**
++   * Diagnostics for the startup failure page: the child's exit code and the tail of its stderr.
++   * @returns Multi-line, copy-pasteable facts about the backend that failed to start.
++   */
++  diagnostics(): string {
++    const tail = this.stderr.trim().split('\n').slice(-8).join('\n')
++    return [
++      `退出码: ${this.exitCode === undefined ? '（后端进程仍在运行）' : String(this.exitCode)}`,
++      tail === '' ? 'stderr 末尾: （空）' : `stderr 末尾:\n${tail}`,
++    ].join('\n')
++  }
++
+   /**
+    * @param executable - absolute upstream Node.js or Electron executable.
+    * @param runtimeDir - immutable packages carried by the current application.
+@@ -156,6 +169,7 @@ export class DesktopHostProcess {
+     child.once('error', (error) => { this.fail(error) })
+     this.exitPromise = new Promise<void>((resolve) => {
+       child.once('close', (code) => {
++        this.exitCode = code === null ? undefined : code
+         const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
+         if (code !== 0 && code !== null) this.fail(new Error(`dsh desktop host exited with ${String(code)}${suffix}`))
+         else this.fail(new Error(`dsh desktop host stopped${suffix}`))
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -66,3 +66,11 @@ export interface DshDesktopStartupApi extends Pick<DshDesktopApi, 'protocolVersi
+   restart(): Promise<void>
+   resetConfiguration(): Promise<void>
+ }
++
++/**
++ * Bridge for backend-provided application documents: they own the shell bar color and render the
++ * in-app plugin page. Only package administration is exposed, never the recovery operations.
++ */
++export type DshDesktopApplicationApi = Pick<DshDesktopApi, 'protocolVersion' | 'shell'> & {
++  readonly plugins: Pick<DshDesktopApi['plugins'], 'list' | 'add' | 'remove' | 'update' | 'toggle'>
++}
+diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
+--- a/apps/desktop/src/locale.ts
++++ b/apps/desktop/src/locale.ts
+@@ -8,6 +8,9 @@ export const en = {
+   startupErrorDescription: 'Choose a recovery action below. Disabling third-party plugins retains their files.',
+   startupReinstallAdvice: 'If application files are missing or damaged, close the application and reinstall it. Your tasks are stored separately.',
+   startupConfigurationAdvice: 'Reset Desktop deletes all Desktop profile configuration and third-party plugins without a backup, then starts a fresh profile. Shared tasks and settings are retained.',
++  copyDiagnostics: 'Copy diagnostics',
++  copiedDiagnostics: 'Copied to the clipboard.',
++  selectDiagnostics: 'Selected the text: press Ctrl+C.',
+   restartApplication: 'Close and restart',
+   resetConfiguration: 'Reset Desktop and retry',
+   disableThirdPartyPlugins: 'Disable all third-party plugins and retry',
+@@ -50,8 +53,7 @@ export const en = {
+   refreshed: 'Plugin list refreshed.',
+   loadingPlugins: 'Reading Desktop plugins…',
+   trayOpen: 'Open DeepSeek Harness',
+-  trayPlugins: 'Desktop Plugins…',
+-  trayUpdates: 'Check for Updates…',
++  trayBrowser: 'Open in Browser',
+   trayQuit: 'Quit',
+ } as const
+ 
+@@ -66,6 +68,9 @@ export const zh = {
+   startupErrorDescription: '请选择下方的恢复操作。禁用第三方插件会保留插件文件。',
+   startupReinstallAdvice: '如果应用文件缺失或损坏，请关闭应用并重新安装。任务数据存储在独立位置。',
+   startupConfigurationAdvice: '重置 Desktop 会删除桌面端的全部 profile 配置和第三方插件，不保留备份，然后重新初始化并启动。共享任务和设置会保留。',
++  copyDiagnostics: '复制诊断信息',
++  copiedDiagnostics: '已复制到剪贴板。',
++  selectDiagnostics: '已选中文本，请按 Ctrl+C 复制。',
+   restartApplication: '关闭并重启',
+   resetConfiguration: '重置 Desktop 并重试',
+   disableThirdPartyPlugins: '禁用全部第三方插件并重试',
+@@ -108,8 +113,7 @@ export const zh = {
+   refreshed: '插件列表已刷新。',
+   loadingPlugins: '正在读取桌面插件…',
+   trayOpen: '打开 DeepSeek Harness',
+-  trayPlugins: '桌面插件…',
+-  trayUpdates: '检查更新…',
++  trayBrowser: '在浏览器中打开',
+   trayQuit: '退出',
+ } as const satisfies DesktopMessages
+ 
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -10,8 +10,10 @@ import {
+   ipcMain,
+   Menu,
+   protocol,
++  shell,
+   type IpcMainInvokeEvent,
+   type Tray,
++  type WebContents,
+ } from 'electron'
+ import { resolveDesktopPaths } from './paths.ts'
+ import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+@@ -33,11 +35,69 @@ import {
+ } from './shell-ui.ts'
+ 
+ const SCHEME = 'dsh-app'
++/** Persistent partition owned by the in-app Chat panel; the user's web login lives here. */
++const CHAT_PARTITION = 'persist:dsh-fenggu-chat'
++/** Site the in-app Chat panel may load; its sign-in flow stays on this domain family. */
++const CHAT_SITE = 'deepseek.com'
++/** Browser target for the tray's "open in browser" entry. */
++const BROWSER_CHAT_URL = `https://chat.${CHAT_SITE}`
++/** The site refuses a client whose user agent says "Electron"; report the bundled Chromium. */
++const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
++  + `(KHTML, like Gecko) Chrome/${process.versions.chrome ?? '120.0.0.0'} Safari/537.36`
++
++/** Whether a URL is inside the single site the in-app Chat panel is allowed to reach. */
++function isChatUrl(url: string): boolean {
++  try {
++    const parsed = new URL(url)
++    if (parsed.protocol !== 'https:') return false
++    return parsed.hostname === CHAT_SITE || parsed.hostname.endsWith(`.${CHAT_SITE}`)
++  } catch {
++    return false
++  }
++}
++
++/**
++ * Pin every `<webview>` of one window to the Chat partition, and refuse anything else.
++ * @param contents - Renderer allowed to embed the Chat panel.
++ */
++function lockDownChatGuests(contents: WebContents): void {
++  contents.on('will-attach-webview', (event, webPreferences, params) => {
++    delete webPreferences.preload
++    webPreferences.nodeIntegration = false
++    webPreferences.contextIsolation = true
++    webPreferences.sandbox = true
++    webPreferences.webSecurity = true
++    const src = typeof params.src === 'string' ? params.src : ''
++    if (params.partition !== CHAT_PARTITION || (src !== '' && !isChatUrl(src))) event.preventDefault()
++  })
++}
++
++/**
++ * Chat guests get a browser user agent and may never navigate outside the site. `webviewTag` is
++ * enabled for the application window alone and that window rejects guests outside the Chat
++ * partition, so every webview in this process is a Chat guest.
++ */
++function installChatGuestPolicy(): void {
++  app.on('web-contents-created', (_event, contents) => {
++    if (contents.getType() !== 'webview') return
++    try { contents.session.setUserAgent(BROWSER_USER_AGENT) } catch { /* session already gone */ }
++    contents.setUserAgent(BROWSER_USER_AGENT)
++    contents.setWindowOpenHandler(({ url }) => {
++      if (isChatUrl(url)) void shell.openExternal(url)
++      return { action: 'deny' }
++    })
++    contents.on('will-navigate', (event, url) => {
++      if (!isChatUrl(url)) event.preventDefault()
++    })
++  })
++}
+ let focusPrimaryWindow = (): void => {}
+ type RecoveryAction = 'restart' | 'plugins' | 'reset'
+ let profileRecoveryAvailable = (): boolean => false
+ /** Notification-area icon owned by the shell; keeps the application resident. */
+ let shellTray: Tray | undefined
++/** Exit code and stderr tail of the last backend host that failed, captured before it is released. */
++let lastBackendDiagnostics = ''
+ /** Kernel brand mark drawn at the left edge of the shell bar. */
+ let shellBrand = ''
+ const emergencyPages = new WeakMap<BrowserWindow, { url: string; message: string; busy: boolean }>()
+@@ -104,7 +164,7 @@ function developmentHostInspectPort(enabled: boolean): number | undefined {
+   return port
+ }
+ 
+-function createWindow(preload: string, show = false, chrome: 'bar' | 'plain' = 'plain'): BrowserWindow {
++function createWindow(preload: string, show = false, chrome: 'bar' | 'plain' = 'plain', embed = false): BrowserWindow {
+   const icon = shellWindowIcon()
+   const window = new BrowserWindow({
+     width: 1280,
+@@ -128,8 +188,12 @@ function createWindow(preload: string, show = false, chrome: 'bar' | 'plain' = '
+       contextIsolation: true,
+       sandbox: true,
+       webSecurity: true,
++      // The Chat panel hosts the DeepSeek web client in a <webview>. Only the application window
++      // needs the tag, and lockDownChatGuests below narrows every guest it may attach.
++      webviewTag: embed,
+     },
+   })
++  if (embed) lockDownChatGuests(window.webContents)
+   if (chrome === 'bar') {
+     window.webContents.on('did-finish-load', () => {
+       const application = window.webContents.getURL().startsWith(`${SCHEME}://app/`)
+@@ -185,6 +249,7 @@ async function serveShellAsset(request: Request): Promise<Response> {
+ }
+ 
+ async function main(): Promise<void> {
++  installChatGuestPolicy()
+   const resources = runtimeResources()
+   const paths = resolveDesktopPaths()
+   shellBrand = shellBrandMark(resources.dsh)
+@@ -197,13 +262,11 @@ async function main(): Promise<void> {
+   let quitting = false
+   let startup: Promise<void> | undefined
+   let mainWindow: BrowserWindow | undefined
+-  let pluginWindow: BrowserWindow | undefined
+   let shellInstallerOwnsQuit = false
+   let updateState: DesktopUpdateState = { phase: 'idle' }
+   const locale = resolveDesktopLocale(app.getLocale())
+   const messages = locale.messages
+   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
+-  const managementPreload = fileURLToPath(new URL('./preload.cjs', import.meta.url))
+   const startupUrl = `${SCHEME}://shell/startup.html`
+   const applicationUrl = `${SCHEME}://app/index.html`
+   let navigation: { window: BrowserWindow; url: string; promise: Promise<void> } | undefined
+@@ -232,7 +295,12 @@ async function main(): Promise<void> {
+   }
+   const backendState = (): DesktopBackendState => {
+     const state = pageError ?? backend.state
+-    return state.phase === 'error' ? { ...state, profileRecovery: profileRecoveryAvailable() } : state
++    if (state.phase !== 'error') return state
++    return {
++      ...state,
++      message: `${state.message}\n\n--- 诊断 ---\n${failureDiagnostics()}`,
++      profileRecovery: profileRecoveryAvailable(),
++    }
+   }
+   const publishBackend = (state: DesktopBackendState): void => {
+     for (const window of BrowserWindow.getAllWindows()) {
+@@ -242,19 +310,41 @@ async function main(): Promise<void> {
+   const backend = new DesktopBackendController((onFailure) => {
+     if (development === undefined) manager.assertProfileRuntime(activeProject)
+     const hostInspectPort = developmentHostInspectPort(development !== undefined)
++    let hostRef: DesktopHostProcess | undefined
+     const host = new DesktopHostProcess(resources.node, development ?? resources.dsh, activeProject,
+-      hostInspectPort, process.env, onFailure)
++      hostInspectPort, process.env, (error: Error) => {
++        // The controller releases the host as soon as it fails and the failure page is rendered
++        // after that, so read the child's own facts while the object still exists.
++        if (hostRef !== undefined) lastBackendDiagnostics = hostRef.diagnostics()
++        onFailure(error)
++      })
++    hostRef = host
+     return {
+       start: () => host.start(),
+       stop: () => host.stop(),
+       fetch: (request: Request) => host.fetch(request),
+     }
+   }, (state) => {
+-    if (state.phase === 'starting' && !emergencyDocument) pageError = undefined
++    if (state.phase === 'starting' && !emergencyDocument) {
++      pageError = undefined
++      lastBackendDiagnostics = ''
++    }
+     publishBackend(backendState())
+     if (state.phase === 'error') void navigateMain(startupUrl).catch((error: unknown) => { console.error(error) })
+   })
+ 
++  /**
++   * Facts appended to every startup failure: the reason stays in the message, and this adds the
++   * exit code, the tail of stderr, the runtime directory and the address the shell serves the
++   * application on, so a screenshot of the page is enough to act on.
++   */
++  const failureDiagnostics = (): string => [
++    `运行时目录: ${resources.dsh}`,
++    `配置目录: ${activeProject}`,
++    `服务地址: ${applicationUrl}（应用内协议，外壳不监听端口）`,
++    ...(lastBackendDiagnostics === '' ? [] : [lastBackendDiagnostics]),
++  ].join('\n')
++
+   const publishUpdate = (state: DesktopUpdateState): DesktopUpdateState => {
+     updateState = state
+     for (const window of BrowserWindow.getAllWindows()) {
+@@ -335,7 +425,9 @@ async function main(): Promise<void> {
+   })
+ 
+   const mutate = async (event: IpcMainInvokeEvent, mutation: Parameters<DesktopProjectManager['mutate']>[0]): Promise<void> => {
+-    assertDesktopSender(event, ['shell'])
++    // Both documents are shell-owned: the startup page disables plugins, the application page
++    // administers them. Callers narrow this further before reaching here.
++    assertDesktopSender(event, ['shell', 'app'])
+     if (development !== undefined) {
+       throw new Error('dsh desktop: plugin package changes require a packaged application')
+     }
+@@ -354,26 +446,39 @@ async function main(): Promise<void> {
+     assertDesktopSender(event, ['shell'])
+     return locale
+   })
++  // Plugin administration is rendered inside the application document (settings -> Plugins)
++  // rather than in a window of its own, so it is the one shell capability the application page
++  // may call. It stays bound to the primary window and is limited to the five package actions.
++  const assertPluginAdministrator = (event: IpcMainInvokeEvent): void => {
++    assertDesktopSender(event, ['shell', 'app'])
++    if (mainWindow === undefined || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
++      throw new Error('dsh desktop: rejected plugin administration from an unowned window')
++    }
++  }
+   ipcMain.handle(DESKTOP_IPC.pluginsList, (event) => {
+-    assertDesktopSender(event, ['shell'])
++    assertPluginAdministrator(event)
+     if (development !== undefined) return []
+     return manager.listPlugins()
+   })
+   ipcMain.handle(DESKTOP_IPC.pluginsAdd, (event, spec: unknown) => {
++    assertPluginAdministrator(event)
+     if (typeof spec !== 'string') throw new Error('dsh desktop: plugin spec must be a string')
+     return mutate(event, { type: 'plugin-add', spec })
+   })
+   ipcMain.handle(DESKTOP_IPC.pluginsRemove, (event, name: unknown) => {
++    assertPluginAdministrator(event)
+     if (typeof name !== 'string') throw new Error('dsh desktop: plugin name must be a string')
+     return mutate(event, { type: 'plugin-remove', name })
+   })
+   ipcMain.handle(DESKTOP_IPC.pluginsUpdate, (event, name: unknown, version: unknown) => {
++    assertPluginAdministrator(event)
+     if (typeof name !== 'string' || typeof version !== 'string') {
+       throw new Error('dsh desktop: plugin name and version must be strings')
+     }
+     return mutate(event, { type: 'plugin-update', name, version })
+   })
+   ipcMain.handle(DESKTOP_IPC.pluginsToggle, (event, name: unknown, enabled: unknown) => {
++    assertPluginAdministrator(event)
+     if (typeof name !== 'string' || typeof enabled !== 'boolean') throw new Error('dsh desktop: invalid plugin activation request')
+     return mutate(event, { type: 'plugin-toggle', name, enabled })
+   })
+@@ -467,36 +572,22 @@ async function main(): Promise<void> {
+     }
+   }
+ 
+-  const openPluginWindow = (): void => {
+-    if (pluginWindow !== undefined && !pluginWindow.isDestroyed()) {
+-      pluginWindow.focus()
+-      return
+-    }
+-    pluginWindow = createWindow(managementPreload)
+-    pluginWindow.setSize(900, 620)
+-    pluginWindow.setTitle(messages.pluginWindowTitle)
+-    pluginWindow.once('ready-to-show', () => { pluginWindow?.show() })
+-    pluginWindow.once('closed', () => { pluginWindow = undefined })
+-    void pluginWindow.loadURL(`${SCHEME}://shell/plugin-manager.html`)
+-  }
+-
+   // A native menu strip above our own window bar reads like a widget pasted on from outside, and
+-  // it duplicates entries the shell already owns. The same commands live in the tray menu.
++  // it duplicates entries the shell already owns. Plugin administration lives in the settings
++  // page and updates in the "software information" section, so the tray keeps three entries only.
+   Menu.setApplicationMenu(null)
+   shellTray = createShellTray({
+     tooltip: app.name,
+     openLabel: messages.trayOpen,
+-    pluginsLabel: messages.trayPlugins,
+-    updatesLabel: messages.trayUpdates,
++    browserLabel: messages.trayBrowser,
+     quitLabel: messages.trayQuit,
+     onOpen: () => { focusPrimaryWindow() },
+-    onPlugins: openPluginWindow,
+-    onUpdates: () => { void checkAndPrompt(true) },
++    onBrowser: () => { void shell.openExternal(BROWSER_CHAT_URL) },
+     onQuit: () => { app.quit() },
+   })
+ 
+   const createMainWindow = (): BrowserWindow => {
+-    const window = createWindow(appPreload, true, 'bar')
++    const window = createWindow(appPreload, true, 'bar', true)
+     mainWindow = window
+     // Closing the window keeps the application resident in the notification area; quitting
+     // happens from the tray menu or from the update installer taking over.
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -1,7 +1,11 @@
+ /** Startup controls for shell documents; application documents receive the shell bar bridge. */
+ 
+ import { contextBridge, ipcRenderer } from 'electron'
+-import { DESKTOP_IPC, type DshDesktopApi, type DshDesktopStartupApi } from './ipc.ts'
++import {
++  DESKTOP_IPC,
++  type DshDesktopApplicationApi,
++  type DshDesktopStartupApi,
++} from './ipc.ts'
+ import type { DesktopBackendState } from './backend-controller.ts'
+ 
+ const startup: DshDesktopStartupApi = {
+@@ -20,14 +24,24 @@ const startup: DshDesktopStartupApi = {
+   resetConfiguration: () => ipcRenderer.invoke(DESKTOP_IPC.configurationReset) as Promise<void>,
+ }
+ 
+-/** Application documents own the shell bar's color; startup documents must not touch the window. */
+-const application: Pick<DshDesktopApi, 'protocolVersion' | 'shell'> = {
++/**
++ * Application documents own the shell bar's color and host the in-app plugin page. The startup
++ * document must not touch either; it keeps the recovery-only bridge above.
++ */
++const application: DshDesktopApplicationApi = {
+   protocolVersion: 1,
+   shell: {
+     titlebarColor(color: string): void {
+       ipcRenderer.send(DESKTOP_IPC.titlebarColor, color)
+     },
+   },
++  plugins: {
++    list: () => ipcRenderer.invoke(DESKTOP_IPC.pluginsList) as ReturnType<DshDesktopApplicationApi['plugins']['list']>,
++    add: spec => ipcRenderer.invoke(DESKTOP_IPC.pluginsAdd, spec) as Promise<void>,
++    remove: name => ipcRenderer.invoke(DESKTOP_IPC.pluginsRemove, name) as Promise<void>,
++    update: (name, version) => ipcRenderer.invoke(DESKTOP_IPC.pluginsUpdate, name, version) as Promise<void>,
++    toggle: (name, enabled) => ipcRenderer.invoke(DESKTOP_IPC.pluginsToggle, name, enabled) as Promise<void>,
++  },
+ }
+ 
+ contextBridge.exposeInMainWorld('dshDesktop', location.protocol === 'dsh-app:' && location.hostname === 'shell'
+diff --git a/apps/desktop/src/shell-ui.ts b/apps/desktop/src/shell-ui.ts
+--- a/apps/desktop/src/shell-ui.ts
++++ b/apps/desktop/src/shell-ui.ts
+@@ -168,6 +168,30 @@ function shellBarCss(options: ShellBarOptions): string {
+     [class*="_centerCol"] { border-radius: 10px !important; overflow: hidden !important; margin: 0 6px 6px 0 !important; }
+     [class*="_centerCol"] [class*="_root"] { border-radius: 10px !important; }
+     #__dsh_panel_picker, #__dsh_panel_menu { transition: none !important; }
++
++    /* The settings dialog: one size smaller, no blur, and a scrim you have to look for. The
++       dialog belongs to the kernel frontend, which ships prebuilt inside the runtime payload, so
++       the shell stylesheet is the only place these overrides can come from. The nav rules carry
++       three negations because the nav's own children share its class-name prefix. */
++    [class*="_overlay"] > [class*="_mask"] {
++      background: rgba(0, 0, 0, .06) !important;
++      backdrop-filter: none !important;
++      -webkit-backdrop-filter: none !important;
++    }
++    [class*="_overlay"] [class*="_panel"] {
++      width: min(720px, calc(100vw - 64px)) !important;
++      height: min(620px, calc(100vh - 64px)) !important;
++      max-width: calc(100vw - 64px) !important;
++    }
++    [class*="_overlay"] [class*="_panel"] > [class*="_nav"]:not([class*="_navTitle"]):not([class*="_navList"]):not([class*="_navCell"]) {
++      width: 168px !important; gap: 14px !important; padding: 18px 10px 0 !important;
++    }
++    [class*="_overlay"] [class*="_panel"] > [class*="_content"] > [class*="_header"] {
++      height: 46px !important; padding: 14px 12px 6px 8px !important;
++    }
++    [class*="_overlay"] [class*="_panel"] > [class*="_content"] > [class*="_options"] {
++      padding: 0 18px 18px !important;
++    }
+   `
+ }
+ 
+@@ -195,22 +219,22 @@ function shellBarScript(options: ShellBarOptions): string {
+     };
+     const pick = (el) => (el ? getComputedStyle(el).backgroundColor : '');
+ 
+-    /** Sample the chrome color under the bar: stacked semi-transparent layers included, so an
+-     *  open dialog mask cannot make the bar lighter than the page it sits on. */
+-    const chromeColor = () => {
+-      let el = document.elementFromPoint(24, ${String(SHELL_BAR_HEIGHT)} + 40);
+-      const layers = [];
+-      while (el) {
+-        const c = pick(el);
+-        if (opaque(c)) {
+-          let out = c;
+-          for (let i = layers.length - 1; i >= 0; i--) out = over(layers[i], out);
+-          return out;
+-        }
+-        if (c && CLEAR.indexOf(c) === -1) layers.push(c);
+-        el = el.parentElement;
++    /* The bar wears the sidebar's own fill token: a theme value that no dialog, mask, blur or
++       scroll can change. Sampling the pixels under the bar instead folded an open dialog's
++       dimming mask into the window chrome — the bar changed color while settings were open and
++       only crawled back once the mask was gone. */
++    const sidebarFill = () => {
++      /* One probe for the lifetime of the page, parked on <html> so that appending it is not a
++         mutation of <body> (the subtree observer below watches the application markup). */
++      let probe = window.__dshFillProbe;
++      if (!probe || !probe.isConnected) {
++        probe = document.createElement('div');
++        probe.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;'
++          + 'background:var(--dsw-specific-sidebar-fill,var(--dsw-alias-bg-layer-1,#F9FAFB))';
++        document.documentElement.appendChild(probe);
++        window.__dshFillProbe = probe;
+       }
+-      return '';
++      return getComputedStyle(probe).backgroundColor;
+     };
+     const sidebarWidth = () => {
+       const col = document.querySelector('[class*="_sidebarCol"]');
+@@ -335,12 +359,8 @@ function shellBarScript(options: ShellBarOptions): string {
+     };
+ 
+     const sample = () => {
+-      /* While the sidebar is collapsed the sample point lands on a different surface, so the
+-         bar keeps the color it already has instead of flipping on every toggle. */
+-      const narrow = sidebarWidth() < 200;
+       ensurePicker();
+-      if (narrow && window.__dshShellBarColor) return;
+-      let color = chromeColor();
++      let color = sidebarFill();
+       if (!color) {
+         color = pick(document.body);
+         if (!opaque(color)) color = pick(document.documentElement);
+@@ -353,8 +373,8 @@ function shellBarScript(options: ShellBarOptions): string {
+       if (api && api.titlebarColor) api.titlebarColor(color);
+     };
+ 
+-    /* Sampling is event-driven: a page that repaints on scroll must not queue a layout read per
+-       animation frame, and the color rarely changes at all. */
++    /* The color only changes with the theme or the window size, so sampling is event-driven:
++       nothing here reacts to a dialog opening or closing. */
+     const scheduleSample = () => {
+       if (window.__dshSampleTimer) return;
+       window.__dshSampleTimer = setTimeout(() => {
+@@ -366,18 +386,31 @@ function shellBarScript(options: ShellBarOptions): string {
+     sample();
+     if (!window.__dshShellBarObs) {
+       window.__dshShellBarObs = 1;
+-      try {
+-        window.__dshSidebarObs = new ResizeObserver(scheduleSample);
++      /* The kernel remounts the sidebar column as panels change, and an observer on a detached
++         node never fires again, so re-attach whenever the element identity moves. */
++      const watchSidebar = () => {
+         const col = document.querySelector('[class*="_sidebarCol"]');
+-        if (col) window.__dshSidebarObs.observe(col);
++        if (!col || col === window.__dshSidebarNode) return;
++        try { if (window.__dshSidebarObs) window.__dshSidebarObs.disconnect(); } catch (e) {}
++        window.__dshSidebarNode = col;
++        try {
++          window.__dshSidebarObs = new ResizeObserver(scheduleSample);
++          window.__dshSidebarObs.observe(col);
++        } catch (e) {}
++      };
++      watchSidebar();
++      try {
++        new MutationObserver(() => { watchSidebar(); scheduleSample(); })
++          .observe(document.body || document.documentElement, { childList: true, subtree: true });
+       } catch (e) {}
+       try {
+         new MutationObserver(scheduleSample).observe(document.documentElement,
+           { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+       } catch (e) {}
++      try {
++        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', scheduleSample);
++      } catch (e) {}
+       window.addEventListener('resize', scheduleSample);
+-      window.addEventListener('focus', scheduleSample);
+-      setInterval(scheduleSample, 5000);
+     }
+   })()`
+ }
+@@ -397,12 +430,10 @@ export function installShellBar(contents: WebContents, options: ShellBarOptions)
+ export interface ShellTrayOptions {
+   readonly tooltip: string
+   readonly openLabel: string
+-  readonly pluginsLabel: string
+-  readonly updatesLabel: string
++  readonly browserLabel: string
+   readonly quitLabel: string
+   readonly onOpen: () => void
+-  readonly onPlugins: () => void
+-  readonly onUpdates: () => void
++  readonly onBrowser: () => void
+   readonly onQuit: () => void
+ }
+ 
+@@ -418,9 +449,7 @@ export function createShellTray(options: ShellTrayOptions): Tray | undefined {
+   tray.setToolTip(options.tooltip)
+   tray.setContextMenu(Menu.buildFromTemplate([
+     { label: options.openLabel, click: options.onOpen },
+-    { type: 'separator' },
+-    { label: options.pluginsLabel, click: options.onPlugins },
+-    { label: options.updatesLabel, click: options.onUpdates },
++    { label: options.browserLabel, click: options.onBrowser },
+     { type: 'separator' },
+     { label: options.quitLabel, click: options.onQuit },
+   ]))
+diff --git a/apps/desktop/renderer/startup.css b/apps/desktop/renderer/startup.css
+--- a/apps/desktop/renderer/startup.css
++++ b/apps/desktop/renderer/startup.css
+@@ -4,7 +4,12 @@ main { width: min(560px, calc(100vw - 64px)); padding: 40px 0; text-align: cente
+ h1 { margin: 24px 0 12px; font-size: 22px; font-weight: 600; }
+ p { color: #666; line-height: 1.6; }
+ #spinner { width: 32px; height: 32px; margin: auto; border: 3px solid #dedee3; border-top-color: #4d6bfe; border-radius: 50%; animation: spin 0.9s linear infinite; }
+-#error { padding: 16px; border: 1px solid #e0e0e5; border-radius: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; font: 13px/1.6 ui-monospace, monospace; }
++/* Diagnostics are the point of the failure page: keep them selectable and copyable. */
++#error { padding: 16px; border: 1px solid #e0e0e5; border-radius: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; font: 13px/1.6 ui-monospace, monospace; user-select: text; -webkit-user-select: text; cursor: text; }
++#copy { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 12px; }
++#copy-state { color: #666; font-size: 12px; }
++/* A loading page is a spinner and nothing else. */
++#title:empty, #description:empty, #reset-advice:empty, #reinstall-advice:empty { display: none; }
+ #actions { margin-top: 24px; }
+ button { margin: 4px; padding: 10px 18px; border: 1px solid transparent; border-radius: 8px; color: #fff; background: #4d6bfe; font: inherit; cursor: pointer; }
+ button.secondary { color: inherit; background: transparent; border-color: #c8c8d0; }
+diff --git a/apps/desktop/renderer/startup.html b/apps/desktop/renderer/startup.html
+--- a/apps/desktop/renderer/startup.html
++++ b/apps/desktop/renderer/startup.html
+@@ -4,7 +4,8 @@
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self' data:">
+-    <title id="page-title"></title>
++    <!-- The loading state is a spinner and nothing else: no window title, no copy. -->
++    <title></title>
+     <link rel="stylesheet" href="startup.css">
+   </head>
+   <body>
+@@ -14,7 +15,11 @@
+       <p id="description"></p>
+       <p id="reset-advice" hidden></p>
+       <p id="reinstall-advice" hidden></p>
+-      <pre id="error" role="alert" hidden></pre>
++      <pre id="error" role="alert" tabindex="0" hidden></pre>
++      <div id="copy" hidden>
++        <button id="copy-error" class="secondary" type="button"></button>
++        <span id="copy-state" role="status" aria-live="polite"></span>
++      </div>
+       <div id="actions" hidden>
+         <button id="restart" type="button"></button>
+         <button id="disable-plugins" type="button"></button>
+diff --git a/apps/desktop/renderer/startup.js b/apps/desktop/renderer/startup.js
+--- a/apps/desktop/renderer/startup.js
++++ b/apps/desktop/renderer/startup.js
+@@ -3,7 +3,7 @@ const api = window.dshDesktop
+ async function main() {
+   const { id, messages } = await api.locale()
+   document.documentElement.lang = id
+-  document.querySelector('#page-title').textContent = messages.startupLoading
++  document.querySelector('#copy-error').textContent = messages.copyDiagnostics
+   document.querySelector('#restart').textContent = messages.restartApplication
+   document.querySelector('#disable-plugins').textContent = messages.disableThirdPartyPlugins
+   document.querySelector('#reset-configuration').textContent = messages.resetConfiguration
+@@ -11,12 +11,17 @@ async function main() {
+   document.querySelector('#reinstall-advice').textContent = messages.startupReinstallAdvice
+   function render(state) {
+     const failed = state.phase === 'error'
++    // Success is a bare spinner: the page carries no title, no description and no window title.
++    document.documentElement.dataset.phase = failed ? 'error' : 'starting'
++    document.title = failed ? messages.startupFailed : ''
+     document.querySelector('main').setAttribute('aria-busy', String(!failed))
+     document.querySelector('#spinner').hidden = failed
+-    document.querySelector('#title').textContent = failed ? messages.startupFailed : messages.startupLoading
+-    document.querySelector('#description').textContent = failed ? messages.startupErrorDescription : messages.startupLoadingDescription
++    document.querySelector('#title').textContent = failed ? messages.startupFailed : ''
++    document.querySelector('#description').textContent = failed ? messages.startupErrorDescription : ''
+     document.querySelector('#error').hidden = !failed
+     document.querySelector('#error').textContent = failed ? state.message : ''
++    document.querySelector('#copy').hidden = !failed
++    document.querySelector('#copy-state').textContent = ''
+     document.querySelector('#actions').hidden = !failed
+     for (const button of document.querySelectorAll('#actions button')) button.disabled = !failed
+     for (const selector of ['#disable-plugins', '#reset-configuration', '#reset-advice']) {
+@@ -40,6 +45,22 @@ async function main() {
+   document.querySelector('#disable-plugins').addEventListener('click', () => { void recover(() => api.disablePlugins()) })
+   document.querySelector('#reset-configuration').addEventListener('click', () => { void recover(() => api.resetConfiguration()) })
+   document.querySelector('#restart').addEventListener('click', () => { void recover(() => api.restart()) })
++  document.querySelector('#copy-error').addEventListener('click', () => {
++    const state = document.querySelector('#copy-state')
++    const text = document.querySelector('#error').textContent
++    const select = () => {
++      const error = document.querySelector('#error')
++      const range = document.createRange()
++      range.selectNodeContents(error)
++      const selection = window.getSelection()
++      selection.removeAllRanges()
++      selection.addRange(range)
++      state.textContent = messages.selectDiagnostics
++    }
++    const clipboard = navigator.clipboard
++    if (!clipboard || typeof clipboard.writeText !== 'function') { select(); return }
++    clipboard.writeText(text).then(() => { state.textContent = messages.copiedDiagnostics }, select)
++  })
+ }
+ 
+ void main()
+diff --git a/apps/desktop/tests/startup-renderer.spec.ts b/apps/desktop/tests/startup-renderer.spec.ts
+--- a/apps/desktop/tests/startup-renderer.spec.ts
++++ b/apps/desktop/tests/startup-renderer.spec.ts
+@@ -55,11 +55,11 @@ function startup(locale = 'en', status: Promise<DesktopBackendState> = Promise.r
+ 
+ it('shows English loading and recovery actions without a Host document', async () => {
+   const page = startup()
+-  await expect.poll(() => page.element('#title').textContent).not.toBe('')
+-  expect(page.copy()).toMatchInlineSnapshot(`
+-    "Starting DeepSeek Harness…
+-    Your workspace will open when it is ready."
+-  `)
++  await expect.poll(() => page.document.documentElement.dataset.phase).toBe('starting')
++  // The loading state is a bare spinner: no title, no copy, no window title.
++  expect(page.element('#title').textContent).toBe('')
++  expect(page.element('#description').textContent).toBe('')
++  expect(page.document.title).toBe('')
+   expect(page.element('main').getAttribute('aria-busy')).toBe('true')
+   expect(page.element('#spinner').hidden).toBe(false)
+   expect(page.element('#actions').hidden).toBe(true)
+@@ -87,12 +87,11 @@ it('shows English loading and recovery actions without a Host document', async (
+ 
+ it('shows Chinese loading and recovery copy', async () => {
+   const page = startup('zh-CN')
+-  await expect.poll(() => page.element('#title').textContent).not.toBe('')
++  await expect.poll(() => page.document.documentElement.dataset.phase).toBe('starting')
+   expect(page.document.documentElement.lang).toBe('zh-CN')
+-  expect(page.copy()).toMatchInlineSnapshot(`
+-    "正在启动 DeepSeek Harness…
+-    准备就绪后将自动打开工作区。"
+-  `)
++  expect(page.element('#title').textContent).toBe('')
++  expect(page.element('#description').textContent).toBe('')
++  expect(page.element('#copy').hidden).toBe(true)
+   page.publish({ phase: 'error', profileRecovery: true, message: '插件加载失败' })
+   expect(page.copy()).toMatchInlineSnapshot(`
+     "DeepSeek Harness 无法启动
+@@ -108,11 +107,12 @@ it('shows Chinese loading and recovery copy', async () => {
+ 
+ it('renders diagnostic markup as text and exposes failures from recovery actions', async () => {
+   const page = startup()
+-  await expect.poll(() => page.element('#title').textContent).not.toBe('')
++  await expect.poll(() => page.document.documentElement.dataset.phase).toBe('starting')
+   const diagnostic = '<img src=x onerror="window.compromised=true">'
+   page.publish({ phase: 'error', profileRecovery: true, message: diagnostic })
+   expect(page.element('#error').textContent).toBe(diagnostic)
+   expect(page.element('#error').childElementCount).toBe(0)
++  expect(page.element('#copy').hidden).toBe(false)
+   page.restart.mockRejectedValueOnce(new page.dom.window.Error('Retry failed'))
+   page.button('#restart').click()
+   await expect.poll(() => page.element('#error').textContent).toBe('Retry failed')

@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"Segoe UI",system-ui,sans-serif;background:#f6f7f9;display:flex;align-items:center;justify-content:center;height:100vh;padding-top:34px}
+/* 窗口顶栏（主进程 titleBarOverlay 顶上来的那 34px）：启动页也留出同一条，
+   否则切到界面时会闪一下。底色跟启动页背景一致，不留自己的颜色和分割线。 */
+#shellbar{position:fixed;top:0;left:0;right:0;height:34px;-webkit-app-region:drag;background:#f6f7f9;z-index:99}
+.card{background:#fff;border-radius:14px;box-shadow:0 6px 28px rgba(0,0,0,.10);width:560px;padding:36px 32px;text-align:center}
+h1{font-size:20px;color:#111;margin-bottom:18px}
+.spinner{width:28px;height:28px;margin:0 auto 18px;border:3px solid #d8e6e0;border-top-color:#0a3;border-radius:50%;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#status{font-size:14px;color:#333;min-height:22px;white-space:pre-wrap}
+#errTitle{display:none;color:#c0392b;font-size:15px;font-weight:600;margin-bottom:10px}
+textarea{display:none;width:100%;height:180px;margin:10px 0 14px;padding:10px;font:12px/1.5 Consolas,monospace;color:#333;background:#fafafa;border:1px solid #e0c0c0;border-radius:8px;resize:vertical;white-space:pre;overflow:auto}
+.actions{display:none;gap:10px;justify-content:center}
+button{padding:8px 22px;border:none;border-radius:8px;font-size:13px;cursor:pointer}
+#retry{background:#0a3;color:#fff}
+#retry:hover{background:#099}
+#quit{background:#eee;color:#333}
+#quit:hover{background:#ddd}
+#copyHint{display:none;font-size:11px;color:#999;margin-top:10px}
+</style>
+</head>
+<body>
+<div id="shellbar"></div>
+<div class="card">
+  <h1>DeepSeek Harness</h1>
+  <div class="spinner" id="spinner"></div>
+  <div id="status">正在准备…</div>
+  <div id="errTitle">启动失败</div>
+  <textarea id="errbox" readonly spellcheck="false"></textarea>
+  <div class="actions">
+    <button id="retry">重试</button>
+    <button id="quit">退出</button>
+  </div>
+  <div id="copyHint">可选中上方文字按 Ctrl+C 复制；或点击错误框后 Ctrl+A 全选</div>
+</div>
+<script>
+function hideErr() {
+  document.getElementById("errTitle").style.display = "none";
+  var e = document.getElementById("errbox");
+  e.style.display = "none";
+  e.value = "";
+  document.querySelector(".actions").style.display = "none";
+  document.getElementById("copyHint").style.display = "none";
+}
+window.__dshSetStatus = function (t) {
+  hideErr();
+  document.getElementById("spinner").style.display = "";
+  document.getElementById("status").textContent = t;
+  document.getElementById("status").style.color = "#333";
+};
+window.__dshFail = function (t, d) {
+  document.getElementById("spinner").style.display = "none";
+  document.getElementById("status").textContent = t;
+  document.getElementById("status").style.color = "#c0392b";
+  document.getElementById("errTitle").style.display = "block";
+  var e = document.getElementById("errbox");
+  e.style.display = "block";
+  e.value = d || "";
+  document.querySelector(".actions").style.display = "flex";
+  document.getElementById("copyHint").style.display = "block";
+  e.focus();
+  e.select();
+};
+window.__dshReset = function () {
+  hideErr();
+  document.getElementById("spinner").style.display = "";
+  document.getElementById("status").style.color = "#333";
+};
+if (window.dshBoot) {
+  document.getElementById("retry").onclick = function () { window.dshBoot.retry(); };
+  document.getElementById("quit").onclick = function () { window.dshBoot.quit(); };
+}
+</script>
+</body>
+</html>

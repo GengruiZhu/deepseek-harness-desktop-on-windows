@@ -1,0 +1,698 @@
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+index 6883c97..6b2d4b6 100644
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -21,6 +21,7 @@ export const DESKTOP_IPC = {
+   updatesCheck: 'dsh-desktop:updates-check',
+   updatesInstall: 'dsh-desktop:updates-install',
+   updatesState: 'dsh-desktop:updates-state',
++  titlebarColor: 'dsh-desktop:titlebar-color',
+ } as const
+ 
+ /** Desktop release update state rendered by desktop-owned UI. */
+@@ -52,6 +53,10 @@ export interface DshDesktopApi {
+     install(): Promise<void>
+     subscribe(listener: (state: DesktopUpdateState) => void): () => void
+   }
++  /** Application documents paint the shell window bar; startup documents do not own it. */
++  readonly shell: {
++    titlebarColor(color: string): void
++  }
+ }
+ 
+ /** Startup-page controls, unavailable to backend-provided application documents. */
+diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
+index e2e4d9e..e04dd82 100644
+--- a/apps/desktop/src/locale.ts
++++ b/apps/desktop/src/locale.ts
+@@ -49,6 +49,10 @@ export const en = {
+   refreshing: 'Refreshing…',
+   refreshed: 'Plugin list refreshed.',
+   loadingPlugins: 'Reading Desktop plugins…',
++  trayOpen: 'Open DeepSeek Harness',
++  trayPlugins: 'Desktop Plugins…',
++  trayUpdates: 'Check for Updates…',
++  trayQuit: 'Quit',
+ } as const
+ 
+ /** Every Desktop locale supplies the complete English key set. */
+@@ -103,6 +107,10 @@ export const zh = {
+   refreshing: '正在刷新…',
+   refreshed: '插件列表已刷新。',
+   loadingPlugins: '正在读取桌面插件…',
++  trayOpen: '打开 DeepSeek Harness',
++  trayPlugins: '桌面插件…',
++  trayUpdates: '检查更新…',
++  trayQuit: '退出',
+ } as const satisfies DesktopMessages
+ 
+ /** Locale payload exposed to the Desktop-owned renderer. */
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index e63e215..d76cbba 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -11,6 +11,7 @@ import {
+   Menu,
+   protocol,
+   type IpcMainInvokeEvent,
++  type Tray,
+ } from 'electron'
+ import { resolveDesktopPaths } from './paths.ts'
+ import { DesktopProjectManager, type DesktopProjectHooks } from './project-manager.ts'
+@@ -22,11 +23,23 @@ import { claimDesktopSingleInstance } from './single-instance.ts'
+ import { DesktopUpdateCoordinator } from './update-coordinator.ts'
+ import { desktopErrorState } from './startup-error.ts'
+ import { startupFailureDocument } from './startup-document.ts'
++import {
++  applyTitlebarColor,
++  createShellTray,
++  installShellBar,
++  SHELL_BAR_HEIGHT,
++  shellBrandMark,
++  shellWindowIcon,
++} from './shell-ui.ts'
+ 
+ const SCHEME = 'dsh-app'
+ let focusPrimaryWindow = (): void => {}
+ type RecoveryAction = 'restart' | 'plugins' | 'reset'
+ let profileRecoveryAvailable = (): boolean => false
++/** Notification-area icon owned by the shell; keeps the application resident. */
++let shellTray: Tray | undefined
++/** Kernel brand mark drawn at the left edge of the shell bar. */
++let shellBrand = ''
+ const emergencyPages = new WeakMap<BrowserWindow, { url: string; message: string; busy: boolean }>()
+ let recoverApplication = (action: RecoveryAction): Promise<void> => {
+   if (action !== 'restart') return Promise.reject(new Error('Desktop recovery could not initialize; reinstall the application'))
+@@ -91,13 +104,24 @@ function developmentHostInspectPort(enabled: boolean): number | undefined {
+   return port
+ }
+ 
+-function createWindow(preload: string, show = false): BrowserWindow {
++function createWindow(preload: string, show = false, chrome: 'bar' | 'plain' = 'plain'): BrowserWindow {
++  const icon = shellWindowIcon()
+   const window = new BrowserWindow({
+     width: 1280,
+     height: 840,
+     minWidth: 880,
+     minHeight: 600,
+     show,
++    // The shell bar replaces the native title bar; the caption buttons stay native so window
++    // control keeps behaving like every other Windows application.
++    ...(chrome === 'bar'
++      ? {
++          titleBarStyle: 'hidden' as const,
++          titleBarOverlay: { color: '#ffffff', symbolColor: '#4b5563', height: SHELL_BAR_HEIGHT },
++          autoHideMenuBar: true,
++        }
++      : {}),
++    ...(icon === undefined ? {} : { icon }),
+     webPreferences: {
+       preload,
+       nodeIntegration: false,
+@@ -106,6 +130,15 @@ function createWindow(preload: string, show = false): BrowserWindow {
+       webSecurity: true,
+     },
+   })
++  if (chrome === 'bar') {
++    window.webContents.on('did-finish-load', () => {
++      const application = window.webContents.getURL().startsWith(`${SCHEME}://app/`)
++      installShellBar(window.webContents, {
++        mark: application ? shellBrand : '',
++        markTogglesSidebar: application,
++      })
++    })
++  }
+   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+   window.webContents.on('will-navigate', (event, url) => {
+     if (new URL(url).protocol !== `${SCHEME}:`) event.preventDefault()
+@@ -154,9 +187,11 @@ async function serveShellAsset(request: Request): Promise<Response> {
+ async function main(): Promise<void> {
+   const resources = runtimeResources()
+   const paths = resolveDesktopPaths()
++  shellBrand = shellBrandMark(resources.dsh)
+   const development = app.isPackaged ? undefined : join(app.getAppPath(), '.desktop-build', 'development', 'project')
+   const activeProject = development ?? paths.profile
+-  const manager = new DesktopProjectManager(paths, resources)
++  const manager = new DesktopProjectManager(paths, resources,
++    development === undefined ? join(process.resourcesPath, 'plugins') : undefined)
+   profileRecoveryAvailable = () => development === undefined && manager.canRecoverProfile()
+   let pageError: Extract<DesktopBackendState, { phase: 'error' }> | undefined
+   let quitting = false
+@@ -382,6 +417,13 @@ async function main(): Promise<void> {
+     assertDesktopSender(event, ['shell'])
+     await updates.install()
+   })
++  // The application document repaints the window bar as it samples its own background, so the
++  // bar follows the light/dark theme instead of being one fixed strip pasted above the page.
++  ipcMain.on(DESKTOP_IPC.titlebarColor, (event, color: unknown) => {
++    const window = mainWindow
++    if (window === undefined || window.isDestroyed() || event.sender !== window.webContents) return
++    if (typeof color === 'string' && /^rgba?\(/u.test(color)) applyTitlebarColor(window, color)
++  })
+ 
+   const checkAndPrompt = async (manual: boolean): Promise<void> => {
+     const state = await updates.check()
+@@ -438,24 +480,31 @@ async function main(): Promise<void> {
+     void pluginWindow.loadURL(`${SCHEME}://shell/plugin-manager.html`)
+   }
+ 
+-  Menu.setApplicationMenu(Menu.buildFromTemplate([{
+-    label: process.platform === 'darwin' ? app.name : messages.application,
+-    submenu: [
+-      {
+-        label: development === undefined ? messages.pluginsMenu : messages.pluginsMenuPackagedOnly,
+-        accelerator: 'CmdOrCtrl+,',
+-        enabled: development === undefined,
+-        click: openPluginWindow,
+-      },
+-      { label: messages.checkUpdatesMenu, click: () => { void checkAndPrompt(true) } },
+-      { type: 'separator' },
+-      { role: 'quit' },
+-    ],
+-  }]))
++  // A native menu strip above our own window bar reads like a widget pasted on from outside, and
++  // it duplicates entries the shell already owns. The same commands live in the tray menu.
++  Menu.setApplicationMenu(null)
++  shellTray = createShellTray({
++    tooltip: app.name,
++    openLabel: messages.trayOpen,
++    pluginsLabel: messages.trayPlugins,
++    updatesLabel: messages.trayUpdates,
++    quitLabel: messages.trayQuit,
++    onOpen: () => { focusPrimaryWindow() },
++    onPlugins: openPluginWindow,
++    onUpdates: () => { void checkAndPrompt(true) },
++    onQuit: () => { app.quit() },
++  })
+ 
+   const createMainWindow = (): BrowserWindow => {
+-    const window = createWindow(appPreload, true)
++    const window = createWindow(appPreload, true, 'bar')
+     mainWindow = window
++    // Closing the window keeps the application resident in the notification area; quitting
++    // happens from the tray menu or from the update installer taking over.
++    window.on('close', (event) => {
++      if (quitting || shellTray === undefined) return
++      event.preventDefault()
++      window.hide()
++    })
+     window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
+     window.webContents.on('preload-error', (_event, _path, error) => {
+       void showEmergencyError(error).catch((failure: unknown) => { console.error(failure) })
+@@ -485,7 +534,14 @@ async function main(): Promise<void> {
+     if (BrowserWindow.getAllWindows().length === 0) focusPrimaryWindow()
+   })
+   app.on('window-all-closed', () => {
+-    if (process.platform !== 'darwin') app.quit()
++    if (process.platform === 'darwin') return
++    // With a tray present the application stays resident and the tray owns the lifecycle.
++    if (shellTray !== undefined) return
++    app.quit()
++  })
++  app.on('will-quit', () => {
++    shellTray?.destroy()
++    shellTray = undefined
+   })
+   app.on('before-quit', (event) => {
+     if (shellInstallerOwnsQuit || quitting) return
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+index c05b749..423700a 100644
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -1,7 +1,7 @@
+-/** Startup controls for shell documents; application documents receive only the carrier marker. */
++/** Startup controls for shell documents; application documents receive the shell bar bridge. */
+ 
+ import { contextBridge, ipcRenderer } from 'electron'
+-import { DESKTOP_IPC, type DshDesktopStartupApi } from './ipc.ts'
++import { DESKTOP_IPC, type DshDesktopApi, type DshDesktopStartupApi } from './ipc.ts'
+ import type { DesktopBackendState } from './backend-controller.ts'
+ 
+ const startup: DshDesktopStartupApi = {
+@@ -20,5 +20,15 @@ const startup: DshDesktopStartupApi = {
+   resetConfiguration: () => ipcRenderer.invoke(DESKTOP_IPC.configurationReset) as Promise<void>,
+ }
+ 
++/** Application documents own the shell bar's color; startup documents must not touch the window. */
++const application: Pick<DshDesktopApi, 'protocolVersion' | 'shell'> = {
++  protocolVersion: 1,
++  shell: {
++    titlebarColor(color: string): void {
++      ipcRenderer.send(DESKTOP_IPC.titlebarColor, color)
++    },
++  },
++}
++
+ contextBridge.exposeInMainWorld('dshDesktop', location.protocol === 'dsh-app:' && location.hostname === 'shell'
+-  ? startup : { protocolVersion: 1 })
++  ? startup : application)
+diff --git a/apps/desktop/src/preload.ts b/apps/desktop/src/preload.ts
+index b9c04bd..e923b1d 100644
+--- a/apps/desktop/src/preload.ts
++++ b/apps/desktop/src/preload.ts
+@@ -33,6 +33,9 @@ const api: DshDesktopApi = {
+       return () => { ipcRenderer.off(DESKTOP_IPC.updatesState, handle) }
+     },
+   },
++  shell: {
++    titlebarColor: (color: string) => { ipcRenderer.send(DESKTOP_IPC.titlebarColor, color) },
++  },
+ }
+ 
+ contextBridge.exposeInMainWorld('dshDesktop', api)
+diff --git a/apps/desktop/src/shell-ui.ts b/apps/desktop/src/shell-ui.ts
+new file mode 100644
+index 0000000..0fd2e78
+--- /dev/null
++++ b/apps/desktop/src/shell-ui.ts
+@@ -0,0 +1,430 @@
++/**
++ * Shell-owned window chrome: our own title bar, the sidebar ergonomics that go with it,
++ * and the notification-area icon that keeps the application resident after its window closes.
++ *
++ * The page rules below address kernel-generated markup by the stable suffix of its class names
++ * (`_logoRow`, `_panelList`, ...). The hash prefix of those names changes between kernel
++ * releases, so a rename degrades this chrome to "no extra polish" instead of breaking the page.
++ */
++
++import { existsSync, readFileSync } from 'node:fs'
++import { join } from 'node:path'
++import {
++  Menu,
++  nativeImage,
++  Tray,
++  type BrowserWindow,
++  type NativeImage,
++  type WebContents,
++} from 'electron'
++
++/** Height of the shell-owned window bar; the native caption buttons are aligned to it. */
++export const SHELL_BAR_HEIGHT = 34
++
++/** Caption-button colors used before the page reports its own background. */
++const DEFAULT_SYMBOL_COLOR = '#4b5563'
++
++function shellAsset(name: string): string | undefined {
++  const path = join(process.resourcesPath, 'assets', name)
++  return existsSync(path) ? path : undefined
++}
++
++/** Window and taskbar icon shipped beside the application, when the packaging step provided one. */
++export function shellWindowIcon(): string | undefined {
++  return shellAsset('app-icon.png')
++}
++
++function shellTrayImage(): NativeImage | undefined {
++  for (const name of ['tray-icon.png', 'app-icon.png']) {
++    const path = shellAsset(name)
++    if (path === undefined) continue
++    const image = nativeImage.createFromPath(path)
++    if (!image.isEmpty()) return image
++  }
++  return undefined
++}
++
++/**
++ * Read the kernel's own brand mark so the shell bar always matches the installed release.
++ * @param dshRoot - Root of the packaged dsh runtime.
++ * @returns CSS-ready data URI, or an empty string when the asset is unavailable.
++ */
++export function shellBrandMark(dshRoot: string): string {
++  try {
++    const file = join(dshRoot, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'favicon.svg')
++    return `data:image/svg+xml;base64,${readFileSync(file).toString('base64')}`
++  } catch {
++    return ''
++  }
++}
++
++function overlayFor(background: string): { color: string; symbolColor: string } {
++  const match = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/u.exec(background)
++  if (match === null) return { color: background, symbolColor: DEFAULT_SYMBOL_COLOR }
++  const luma = 0.2126 * Number(match[1]) + 0.7152 * Number(match[2]) + 0.0722 * Number(match[3])
++  return { color: background, symbolColor: luma < 140 ? '#e8eaed' : DEFAULT_SYMBOL_COLOR }
++}
++
++/**
++ * Repaint the native caption strip so it never looks pasted onto the page.
++ * @param window - Window whose title bar is hidden.
++ * @param background - Opaque CSS color sampled from the page.
++ */
++export function applyTitlebarColor(window: BrowserWindow, background: string): void {
++  const overlay = overlayFor(background)
++  try {
++    window.setBackgroundColor(background)
++    window.setTitleBarOverlay({ ...overlay, height: SHELL_BAR_HEIGHT })
++  } catch {
++    // setTitleBarOverlay is Windows/Linux-only; a window without the overlay simply keeps its color.
++  }
++}
++
++/** Options for {@link installShellBar}. */
++export interface ShellBarOptions {
++  /** Data URI of the brand mark drawn at the bar's left edge; an empty string hides it. */
++  readonly mark: string
++  /** Whether clicking the brand mark collapses the sidebar. */
++  readonly markTogglesSidebar: boolean
++}
++
++function shellBarCss(options: ShellBarOptions): string {
++  return `
++    body { padding-top: ${String(SHELL_BAR_HEIGHT)}px !important; box-sizing: border-box !important; }
++    #__dsh_shell_bar {
++      position: fixed; top: 0; left: 0; right: 0; height: ${String(SHELL_BAR_HEIGHT)}px;
++      display: flex; align-items: center; padding: 0 12px;
++      -webkit-app-region: drag; user-select: none; pointer-events: auto;
++      background: var(--dsh-shell-bar-bg, transparent);
++      z-index: 2147483000;
++    }
++    #__dsh_shell_bar .mark {
++      width: 18px; height: 18px;
++      background-image: ${options.mark === '' ? 'none' : `url("${options.mark}")`};
++      background-size: contain; background-repeat: no-repeat; background-position: center;
++      /* The mark collapses the sidebar, so it must not be a drag region: dragging would
++         otherwise swallow the click. */
++      -webkit-app-region: no-drag; cursor: pointer; border-radius: 6px; padding: 2px; box-sizing: content-box;
++    }
++    #__dsh_shell_bar .mark.hidden { display: none !important; }
++    #__dsh_shell_bar .mark:hover { background-color: rgba(127, 127, 127, .14); }
++
++    /* The sidebar's own brand row repeats the bar above it, and its collapse button moved into
++       the bar, so the whole row collapses to zero height and the panel list takes its place. */
++    [class*="_logoRow"] [class*="_brandIdentity"],
++    [class*="_logoRow"] [class*="_brand"],
++    [class*="_logoRow"] > button { display: none !important; }
++    [class*="_logoRow"] {
++      height: 0 !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important;
++      justify-content: flex-start !important;
++    }
++    [class*="_collapsed"] [class*="_logoRow"] {
++      height: 0 !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important;
++    }
++    [class*="_panelList"] { display: none !important; }
++
++    /* Panel picker ("workspace ⌄"), merged into the row that already carries the title. */
++    #__dsh_panel_picker {
++      position: relative; display: inline-flex; align-items: center; gap: 6px;
++      -webkit-app-region: no-drag; cursor: pointer; padding: 5px 10px; margin-left: -10px; border-radius: 8px;
++      font: 600 14px/1 "Segoe UI", system-ui, sans-serif; color: var(--dsw-alias-label-primary, #111);
++      user-select: none;
++    }
++    #__dsh_panel_picker:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .05)); }
++    #__dsh_panel_picker .chev { display: inline-flex; width: 12px; height: 12px; opacity: .5; }
++    #__dsh_panel_picker .chev svg { display: block; }
++    /* The menu lives on <body>: the sidebar row clips its overflow, which would hide a nested menu. */
++    #__dsh_panel_menu {
++      display: none; position: fixed; min-width: 168px; padding: 6px;
++      border-radius: 10px;
++      background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #fff));
++      color: var(--dsw-alias-label-primary, #111);
++      font-family: inherit;
++      box-shadow: 0 10px 30px var(--dsw-alias-bg-mask-2, rgba(0, 0, 0, .16));
++      border: 1px solid var(--dsw-alias-border-l3, var(--dsw-alias-border-l2, rgba(0, 0, 0, .08)));
++      z-index: 2147483001;
++    }
++    #__dsh_panel_menu.open { display: block; }
++    #__dsh_panel_menu .item {
++      display: block; width: 100%; text-align: left; padding: 8px 10px; border: none;
++      background: transparent; border-radius: 7px; cursor: pointer;
++      font: 500 13px/1.2 "Segoe UI", system-ui, sans-serif; color: var(--dsw-alias-label-primary, #111);
++    }
++    #__dsh_panel_menu .item:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .05)); }
++    #__dsh_panel_menu .item.on { font-weight: 600; }
++
++    /* The kernel's full-width "new session" button: held down by every paintable property so
++       React remounting it during a sidebar toggle cannot flash it for one frame. New sessions
++       are started from the entry on the title row instead. */
++    [class*="_newSession"] {
++      display: none !important; visibility: hidden !important;
++      width: 0 !important; height: 0 !important; min-width: 0 !important; min-height: 0 !important;
++      margin: 0 !important; padding: 0 !important; overflow: hidden !important;
++    }
++
++    /* The workspace reads as a white card floating on the sidebar's gray: round the content
++       column and keep a small gap on the right and bottom so the corners are actually visible. */
++    [class*="_frame"] { background: var(--dsh-shell-bar-bg, #F9FAFB) !important; }
++    [class*="_centerCol"] { border-radius: 10px !important; overflow: hidden !important; margin: 0 6px 6px 0 !important; }
++    [class*="_centerCol"] [class*="_root"] { border-radius: 10px !important; }
++    #__dsh_panel_picker, #__dsh_panel_menu { transition: none !important; }
++  `
++}
++
++function shellBarScript(options: ShellBarOptions): string {
++  return String.raw`(() => {
++    const MARK = ${JSON.stringify(options.mark)};
++    const TOGGLES = ${options.markTogglesSidebar ? 'true' : 'false'};
++    const CLEAR = ['rgba(0, 0, 0, 0)', 'transparent', ''];
++    const parse = (c) => {
++      const m = /rgba?\(([^)]+)\)/.exec(String(c || ''));
++      if (!m) return null;
++      const p = m[1].split(',').map((s) => Number(s.trim()));
++      if (p.length < 3 || p.some((n) => Number.isNaN(n))) return null;
++      return { r: p[0], g: p[1], b: p[2], a: p.length >= 4 ? p[3] : 1 };
++    };
++    const opaque = (c) => { const p = parse(c); return !!p && p.a >= 0.95; };
++    const over = (src, dst) => {
++      const s = parse(src);
++      const d = parse(dst);
++      if (!s || !d) return dst;
++      const a = s.a + d.a * (1 - s.a);
++      if (a <= 0) return dst;
++      const mix = (x, y) => Math.round((x * s.a + y * d.a * (1 - s.a)) / a);
++      return 'rgb(' + mix(s.r, d.r) + ', ' + mix(s.g, d.g) + ', ' + mix(s.b, d.b) + ')';
++    };
++    const pick = (el) => (el ? getComputedStyle(el).backgroundColor : '');
++
++    /** Sample the chrome color under the bar: stacked semi-transparent layers included, so an
++     *  open dialog mask cannot make the bar lighter than the page it sits on. */
++    const chromeColor = () => {
++      let el = document.elementFromPoint(24, ${String(SHELL_BAR_HEIGHT)} + 40);
++      const layers = [];
++      while (el) {
++        const c = pick(el);
++        if (opaque(c)) {
++          let out = c;
++          for (let i = layers.length - 1; i >= 0; i--) out = over(layers[i], out);
++          return out;
++        }
++        if (c && CLEAR.indexOf(c) === -1) layers.push(c);
++        el = el.parentElement;
++      }
++      return '';
++    };
++    const sidebarWidth = () => {
++      const col = document.querySelector('[class*="_sidebarCol"]');
++      return col ? (col.clientWidth || 999) : 999;
++    };
++
++    let bar = document.getElementById('__dsh_shell_bar');
++    if (!bar) {
++      bar = document.createElement('div');
++      bar.id = '__dsh_shell_bar';
++      const mark = document.createElement('span');
++      mark.className = 'mark';
++      if (MARK === '') mark.classList.add('hidden');
++      bar.appendChild(mark);
++      (document.body || document.documentElement).appendChild(bar);
++    }
++    const mark = bar.querySelector('.mark');
++    if (mark) mark.title = '收起 / 展开侧栏';
++
++    const toggleSidebar = () => {
++      const row = document.querySelector('[class*="_logoRow"]');
++      if (!row) return;
++      const buttons = Array.prototype.filter.call(row.querySelectorAll('button'),
++        (b) => b.id !== '__dsh_new_session');
++      const button = buttons[buttons.length - 1];
++      if (button) button.click();
++    };
++    if (!window.__dshShellBarWired) {
++      window.__dshShellBarWired = 1;
++      document.addEventListener('click', (ev) => {
++        const t = ev.target;
++        if (TOGGLES && t && t.closest && t.closest('#__dsh_shell_bar .mark')) {
++          ev.stopPropagation();
++          toggleSidebar();
++        }
++      }, true);
++      document.addEventListener('mousedown', (ev) => {
++        const t = ev.target;
++        if (t && t.closest && t.closest('#__dsh_shell_bar')) ev.stopPropagation();
++      }, true);
++    }
++
++    /** Panel picker: the kernel renders one button per sidebar panel, so the picker reads their
++     *  labels and clicks them — the same path a user takes, without touching private state. */
++    const ensurePicker = () => {
++      const row = document.querySelector('[class*="_logoRow"]');
++      if (!row) return;
++      const list = document.querySelector('[class*="_panelList"]');
++      const rows = list ? Array.prototype.slice.call(list.querySelectorAll('button')) : [];
++      if (rows.length < 2) return;
++      let active = null;
++      for (const b of rows) if (b.getAttribute('aria-current') === 'page') active = b;
++      if (!active) active = rows[0];
++      let picker = document.getElementById('__dsh_panel_picker');
++      if (!picker) {
++        picker = document.createElement('div');
++        picker.id = '__dsh_panel_picker';
++        const label = document.createElement('span');
++        label.className = 'lbl';
++        const chev = document.createElement('span');
++        chev.className = 'chev';
++        chev.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.75 4.5L6 7.75L9.25 4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
++        picker.appendChild(label);
++        picker.appendChild(chev);
++        const menu = document.createElement('div');
++        menu.id = '__dsh_panel_menu';
++        document.body.appendChild(menu);
++        picker.addEventListener('click', (ev) => {
++          ev.stopPropagation();
++          const box = picker.getBoundingClientRect();
++          menu.style.left = Math.round(box.left) + 'px';
++          menu.style.top = Math.round(box.bottom + 6) + 'px';
++          menu.classList.toggle('open');
++        });
++        document.addEventListener('click', () => menu.classList.remove('open'));
++        window.addEventListener('blur', () => menu.classList.remove('open'));
++        document.addEventListener('scroll', () => menu.classList.remove('open'), true);
++        row.insertBefore(picker, row.firstChild);
++      }
++      picker.querySelector('.lbl').textContent = active.getAttribute('aria-label') || '面板';
++      const signature = rows.map((b) => (b.getAttribute('aria-label') || '')
++        + (b.getAttribute('aria-current') === 'page' ? '*' : '')).join('|');
++      const menu = document.getElementById('__dsh_panel_menu');
++      if (menu.dataset.sig !== signature) {
++        menu.dataset.sig = signature;
++        menu.textContent = '';
++        rows.forEach((b) => {
++          const item = document.createElement('button');
++          item.type = 'button';
++          item.className = 'item' + (b.getAttribute('aria-current') === 'page' ? ' on' : '');
++          item.textContent = b.getAttribute('aria-label') || '';
++          item.addEventListener('click', (ev) => {
++            ev.stopPropagation();
++            b.click();
++            menu.classList.remove('open');
++          });
++          menu.appendChild(item);
++        });
++      }
++      /* Merge the picker into the row that already shows the panel title: that row carries the
++         search/filter/new buttons, so the title and the picker do not say the same thing twice. */
++      const activeLabel = active.getAttribute('aria-label') || '';
++      const scope = row.closest('[class*="_sidebarCol"]') || document;
++      let hosted = false;
++      for (const el of scope.querySelectorAll('div, span')) {
++        if (el.children.length || el.closest('#__dsh_panel_picker') || el.closest('#__dsh_panel_menu')) continue;
++        if ((el.textContent || '').trim() !== activeLabel) continue;
++        const parent = el.parentElement;
++        if (!parent) continue;
++        if (!parent.querySelector('button')) continue;
++        el.style.setProperty('display', 'none', 'important');
++        if (!parent.contains(picker)) parent.insertBefore(picker, parent.firstChild);
++        hosted = true;
++      }
++      const narrow = sidebarWidth() < 200;
++      const force = (el, wide) => { if (el) el.style.setProperty('display', wide ? 'inline-flex' : 'none', 'important'); };
++      force(picker, !narrow);
++      if (hosted) row.style.setProperty('display', 'none', 'important');
++      const newSession = document.querySelector('[class*="_newSession"]');
++      if (newSession) newSession.style.setProperty('display', 'none', 'important');
++      if (list) list.style.setProperty('display', narrow ? 'flex' : 'none', 'important');
++    };
++
++    const sample = () => {
++      /* While the sidebar is collapsed the sample point lands on a different surface, so the
++         bar keeps the color it already has instead of flipping on every toggle. */
++      const narrow = sidebarWidth() < 200;
++      ensurePicker();
++      if (narrow && window.__dshShellBarColor) return;
++      let color = chromeColor();
++      if (!color) {
++        color = pick(document.body);
++        if (!opaque(color)) color = pick(document.documentElement);
++      }
++      if (!opaque(color)) color = window.__dshShellBarColor || 'rgb(255, 255, 255)';
++      if (color === window.__dshShellBarColor) return;
++      window.__dshShellBarColor = color;
++      document.documentElement.style.setProperty('--dsh-shell-bar-bg', color);
++      const api = window.dshDesktop && window.dshDesktop.shell;
++      if (api && api.titlebarColor) api.titlebarColor(color);
++    };
++
++    /* Sampling is event-driven: a page that repaints on scroll must not queue a layout read per
++       animation frame, and the color rarely changes at all. */
++    const scheduleSample = () => {
++      if (window.__dshSampleTimer) return;
++      window.__dshSampleTimer = setTimeout(() => {
++        window.__dshSampleTimer = 0;
++        try { sample(); } catch (e) {}
++      }, 120);
++    };
++
++    sample();
++    if (!window.__dshShellBarObs) {
++      window.__dshShellBarObs = 1;
++      try {
++        window.__dshSidebarObs = new ResizeObserver(scheduleSample);
++        const col = document.querySelector('[class*="_sidebarCol"]');
++        if (col) window.__dshSidebarObs.observe(col);
++      } catch (e) {}
++      try {
++        new MutationObserver(scheduleSample).observe(document.documentElement,
++          { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
++      } catch (e) {}
++      window.addEventListener('resize', scheduleSample);
++      window.addEventListener('focus', scheduleSample);
++      setInterval(scheduleSample, 5000);
++    }
++  })()`
++}
++
++/**
++ * Install the shell bar and sidebar ergonomics into one application document.
++ * @param contents - Renderer showing the application page.
++ * @param options - Bar brand mark and behaviour.
++ */
++export function installShellBar(contents: WebContents, options: ShellBarOptions): void {
++  if (contents.isDestroyed()) return
++  contents.insertCSS(shellBarCss(options)).catch(() => undefined)
++  void contents.executeJavaScript(shellBarScript(options), true).catch(() => undefined)
++}
++
++/** Notification-area menu copy and callbacks. */
++export interface ShellTrayOptions {
++  readonly tooltip: string
++  readonly openLabel: string
++  readonly pluginsLabel: string
++  readonly updatesLabel: string
++  readonly quitLabel: string
++  readonly onOpen: () => void
++  readonly onPlugins: () => void
++  readonly onUpdates: () => void
++  readonly onQuit: () => void
++}
++
++/**
++ * Create the icon that keeps the application resident after its window is closed.
++ * @param options - Menu copy and callbacks owned by the shell.
++ * @returns The tray, or undefined when the packaging step shipped no usable image.
++ */
++export function createShellTray(options: ShellTrayOptions): Tray | undefined {
++  const image = shellTrayImage()
++  if (image === undefined) return undefined
++  const tray = new Tray(image)
++  tray.setToolTip(options.tooltip)
++  tray.setContextMenu(Menu.buildFromTemplate([
++    { label: options.openLabel, click: options.onOpen },
++    { type: 'separator' },
++    { label: options.pluginsLabel, click: options.onPlugins },
++    { label: options.updatesLabel, click: options.onUpdates },
++    { type: 'separator' },
++    { label: options.quitLabel, click: options.onQuit },
++  ]))
++  tray.on('click', options.onOpen)
++  tray.on('double-click', options.onOpen)
++  return tray
++}
