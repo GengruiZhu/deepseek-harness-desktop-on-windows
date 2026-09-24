@@ -2,6 +2,25 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
+## 0.9.2-rc1 (2026-09-24)
+
+**内核升级 0.1.6-alpha.2 → 0.1.7-rc.1 + Office 修好 + 「装完打不开」修好 + 进程生命周期收尾**（活跃补丁 4 → **7 个**）。
+
+- **Office 文档转换修好**（拖了很久的问题）：根因两层 —— ① 旧引擎 `libreoffice-kit 0.0.1` 在这台机器上只能起 Writer（xlsx 组件加载失败、pptx 堆损坏 `0xC0000374`）；② 引擎有固定长度路径坑（同一引擎 xcd 路径 185 字符正常、**228 字符失败**、288 字符连 helper 都拉不起来）。0.1.7-rc.1 把引擎换成 **0.1.0**，两个问题一起消失：docx / xlsx / pptx 全部转换成功，含**真实 Excel 报价表与 PowerPoint 文件**（旧引擎对照组 xlsx / pptx 全挂）
+- **修复「安装成功但打不开」**（本轮最重要）：第一方包以 `workspace:` / `link:` 引入，被 link 的包自己的依赖住在它自己的 `node_modules` 里，electron-builder 的生产依赖收集够不到 → `app.asar` 缺 6 个必需包（`cordis-plugin-loader` 等），启动即 `ERR_MODULE_NOT_FOUND`
+  - 修法：新增依赖闭包收集器 `collect-app-dependencies.mjs`（从 app 的 `lib/**` 入口按**每个文件自己的位置**做 Node 解析，把 152 个包显式塞进 asar）→ asar 108 → 168 MB，安装包 304.8 → **317.1 MB**
+  - 之所以以前是假绿：`win-unpacked` 就在仓库里，Node 会向上「借」`vendor/deepseek-harness/node_modules`；验收脚本因此新增 **`-OutsideRepo`**（复制到 `%TEMP%` 再启动）——这是唯一能证明「装到别人机器上也能开」的测法
+- **重复启动不再留僵尸进程**：非首个实例在 `requestSingleInstanceLock()` 失败后只调 `app.quit()`，而 Electron 会把 ready 之前到达的 quit 推迟到启动完成 → 启动永远完不成时进程永久存在。现在补 2 秒强制 `process.exit(0)`
+- **托盘「退出」带走整棵进程树**：Host 后端以同一个 `dsh.exe`（Node 模式）运行且自己有子进程（14 个 MCP、终端、预览 helper）。新增 `killTree()`（`taskkill /PID … /T /F`，带已回收 pid 守卫）与 `forceStopHost()`，挂在 `before-quit` 6 秒兜底 / `before-quit` 收尾 / `will-quit` / `process.on('exit')` 四处；新增诊断开关 `DSH_DESKTOP_QUIT_AFTER_MS`（走与托盘退出**完全相同**的 `app.quit()`）
+- **启动时窗口先出来**：原来 `show: false` 建窗后要等 `backend.start()` → `enterWorkspace()` 才 `show()`，而文档（内核自带 boot 页）早已加载完 —— 实测窗口可见 **2.77 s → 0.55 s**（后端就绪仍 2.50 s）。同时删掉 `focusPrimaryWindow()` 里的 `!enteredWorkspace` 早退，启动期间点托盘 / 再点快捷方式都有响应
+- **安装器遇到「正在运行」**：原来是「只检查不杀」（提示关闭应用，而关窗口只会收进托盘，用户根本执行不了）。现在一次确认后依次：壳新增的 `--dsh-quit`（请它自己退，最干净）→ `taskkill /IM dsh.exe /T /F` → 按安装目录前缀扫杀 → 仍失败弹「重试 / 取消」并附最后一次工具的原始输出
+- **补丁增至 7 个**（全部正反向 `git apply --check` 通过）：新增 `desktop-app-dependencies`（`dsh-app-boot` / `dsh-deepseek-account` / `dsh-home-paths` 从 devDependencies 提为 dependencies）、`desktop-build-smoke-defer`（重锚 rc.1 新增的 skill CLI 检查）、`desktop-installer-stop-running`（`customCheckAppRunning` 改「是/否 → taskkill → 轮询」+ 三条文案）
+- **构建期 Office 冒烟仍跳过**：仓库路径（材料化树 228 / 打包树 288 字符）超出引擎承受长度，与产物无关（产物里是 185 字符那条，已用安装载荷实测通过）；仓库挪到浅路径后即可撤掉豁免
+- **验收**（读产物 + `-OutsideRepo` + 隔离 DSH_HOME / 独立 user-data-dir / 临时端口）：内核实测 `0.1.7-rc.1`、`releaseLabel = 0.9.2-rc1`、`appId = com.gengruizhu.dsh`、无 `dshMandatoryUpdatePolicy`；插件整树哈希与源一致；黑鲸鱼图标、打包日志 0 条默认图标告警；关窗常驻；重复启动第二个进程 0.6 s 自行退出且主人窗口被顶回；`DSH_DESKTOP_QUIT_AFTER_MS` 到点后 3.6 s 内进程数归 0；窗口可见 0.55 s、后端就绪 2.50 s
+- 遗留：unsigned 构建仍不带官方更新 feed（「检查更新」按官方逻辑报暂无可用更新）
+- 交付报告：`work/rc1-status.md`（构建日志 `werk/rc1-build*.log`、验收 `werk/alpha2-verify/*/report.json`，均不入库）
+- ⚠️ rc 候选版：内核为 rc 档。
+
 ## 0.9.1-alpha2 (2026-09-19)
 
 **改用官方 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 桌面壳**（内核 **0.1.6-alpha.2**；本仓库从此只做 Windows 打包 + 补丁）。

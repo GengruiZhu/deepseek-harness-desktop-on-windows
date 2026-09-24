@@ -1,8 +1,101 @@
+diff --git a/apps/desktop/src/browser-guests.ts b/apps/desktop/src/browser-guests.ts
+index 027b7cee..2890b984 100644
+--- a/apps/desktop/src/browser-guests.ts
++++ b/apps/desktop/src/browser-guests.ts
+@@ -1,6 +1,6 @@
+ /** Main-process ownership and fixed isolation policy for Sidebar webview guests. */
+ import { randomUUID } from 'node:crypto'
+-import { app, session, type BrowserWindow, type Session, type WebContents } from 'electron'
++import { app, session, shell, type BrowserWindow, type Session, type WebContents } from 'electron'
+ import type { DesktopBrowserLeaseId, DesktopBrowserOpenRequest, DesktopBrowserReservation } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
+ import { DESKTOP_IPC } from './ipc.ts'
+ 
+@@ -11,6 +11,30 @@ interface GuestLease {
+   guest?: WebContents
+ }
+ 
++/**
++ * The shell also carries one guest that is not a sidebar-browser tab: the application's own Chat
++ * panel embeds the DeepSeek web client in a dedicated persistent partition, so the user's web
++ * sign-in survives restarts. It is not lease-owned, so it is admitted here under its own fixed
++ * isolation policy instead of the lease checks below.
++ */
++const CHAT_PARTITION = 'persist:dsh-fenggu-chat'
++/** Site the in-app Chat panel may load; its sign-in flow stays on this domain family. */
++const CHAT_SITE = 'deepseek.com'
++/** The site refuses a client whose user agent says "Electron"; report the bundled Chromium. */
++const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
++  + `(KHTML, like Gecko) Chrome/${process.versions.chrome ?? '120.0.0.0'} Safari/537.36`
++
++/** Whether a URL is inside the single site the in-app Chat panel is allowed to reach. */
++function isChatUrl(url: string): boolean {
++  try {
++    const parsed = new URL(url)
++    if (parsed.protocol !== 'https:') return false
++    return parsed.hostname === CHAT_SITE || parsed.hostname.endsWith(`.${CHAT_SITE}`)
++  } catch {
++    return false
++  }
++}
++
+ /** Owns workspace storage partitions independently from individual tab guests. */
+ export class DesktopBrowserGuests {
+   private readonly partitions = new Map<string, string>()
+@@ -67,6 +91,20 @@ export class DesktopBrowserGuests {
+   bind(window: BrowserWindow): void {
+     const owner = window.webContents
+     owner.on('will-attach-webview', (event, preferences, params) => {
++      // The Chat panel's own guest: fixed partition, its own site only, and no preload of its own.
++      if (params.partition === CHAT_PARTITION && (typeof params.src !== 'string' || isChatUrl(params.src))) {
++        delete preferences.preload
++        Object.assign(preferences, {
++          partition: CHAT_PARTITION,
++          nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false,
++          contextIsolation: true, sandbox: true, webSecurity: true, allowRunningInsecureContent: false,
++          webviewTag: false, plugins: false, navigateOnDragDrop: false, disableDialogs: true,
++        })
++        params.httpreferrer = ''
++        // The site refuses a client whose user agent says "Electron"; set it before the guest loads.
++        try { session.fromPartition(CHAT_PARTITION).setUserAgent(BROWSER_USER_AGENT) } catch { /* session already gone */ }
++        return
++      }
+       const id = typeof params.src === 'string' && params.src.startsWith('about:blank#')
+         ? params.src.slice('about:blank#'.length) : ''
+       const lease = this.leases.get(id as DesktopBrowserLeaseId)
+@@ -89,6 +127,20 @@ export class DesktopBrowserGuests {
+       params.httpreferrer = ''
+     })
+     owner.on('did-attach-webview', (_event, guest) => {
++      // The Chat panel's guest keeps its own partition's cookies and may never leave its site.
++      let chatGuest = false
++      try { chatGuest = guest.session === session.fromPartition(CHAT_PARTITION) } catch { chatGuest = false }
++      if (chatGuest) {
++        guest.setUserAgent(BROWSER_USER_AGENT)
++        guest.setWindowOpenHandler(({ url }) => {
++          if (isChatUrl(url)) void shell.openExternal(url)
++          return { action: 'deny' }
++        })
++        guest.on('will-navigate', (event, url) => { if (!isChatUrl(url)) event.preventDefault() })
++        guest.on('will-attach-webview', (event) => { event.preventDefault() })
++        guest.on('login', (event, _details, _authInfo, callback) => { event.preventDefault(); callback() })
++        return
++      }
+       let attachedLease: DesktopBrowserLeaseId | undefined
+       // The first document is an inert about:blank carrying the approved lease.
+       // Bind on the main-process event before the renderer can navigate the ready guest.
 diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
-index e4be343c..c6c5b334 100644
+index 37d8c31e..ddfd8dd2 100644
 --- a/apps/desktop/src/host-process.ts
 +++ b/apps/desktop/src/host-process.ts
-@@ -75,6 +75,7 @@ export class DesktopHostProcess {
+@@ -1,6 +1,6 @@
+ /** Electron Node-mode child lifecycle for the shared Web application. */
+ 
+-import { spawn, type ChildProcess } from 'node:child_process'
++import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+ import { join } from 'node:path'
+ import type { PlatformSession } from '@deepseek-ai/dsh-deepseek-account'
+ import { desktopNodeEnvironment } from './node-environment.ts'
+@@ -122,6 +122,7 @@ export class DesktopHostProcess {
    })
    private exitPromise: Promise<void> | undefined
    private stderr = ''
@@ -10,8 +103,8 @@ index e4be343c..c6c5b334 100644
    private failureReported = false
    private stopping = false
    private shutdownCompleted = false
-@@ -105,6 +106,26 @@ export class DesktopHostProcess {
-     private readonly packageManager?: { readonly pnpm: string; readonly nodeBin: string },
+@@ -153,6 +154,55 @@ export class DesktopHostProcess {
+     private readonly onPlatformSession?: (session: PlatformSession | null) => void,
    ) {}
  
 +  /**
@@ -34,10 +127,39 @@ index e4be343c..c6c5b334 100644
 +    ].join('\n')
 +  }
 +
++  /** Process id of the child this object still owns, for lifecycle diagnostics. */
++  get pid(): number | undefined { return this.child?.pid }
++
++  /**
++   * Terminate this child and everything it spawned, without waiting for a graceful shutdown.
++   *
++   * The Host runs as this executable in Node mode and owns its own children (plugin subprocesses,
++   * shells, preview helpers), so signalling the child alone can leave a resident orphan that keeps
++   * the profile and its port occupied after the window and the tray icon are gone. Windows
++   * therefore gets a synchronous tree kill; other platforms signal the child, which is all the
++   * standard escalation offers there. The exit-status guards make sure only a child this object
++   * still owns is touched, so a recycled process id can never be hit.
++   */
++  killTree(): void {
++    const child = this.child
++    if (child === undefined || child.exitCode !== null || child.signalCode !== null) return
++    const pid = child.pid
++    if (pid !== undefined && process.platform === 'win32') {
++      try {
++        const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
++        execFileSync(join(system32, 'taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
++        return
++      } catch {
++        // Fall through: taskkill refuses an already-dead process, and the child is then gone anyway.
++      }
++    }
++    try { child.kill('SIGKILL') } catch { /* the child is already gone */ }
++  }
++
    /**
     * Start this child once and await its Web application URL.
     * @returns Ready facts supplied by the child after application startup.
-@@ -151,6 +172,7 @@ export class DesktopHostProcess {
+@@ -199,6 +249,7 @@ export class DesktopHostProcess {
      child.once('error', (error) => { this.fail(error) })
      this.exitPromise = new Promise<void>((resolve) => {
        child.once('close', (code) => {
@@ -45,11 +167,22 @@ index e4be343c..c6c5b334 100644
          const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
          if (code !== 0 && code !== null) this.fail(new Error(`dsh desktop host exited with ${String(code)}${suffix}`))
          else this.fail(new Error(`dsh desktop host stopped${suffix}`))
+@@ -249,7 +300,9 @@ export class DesktopHostProcess {
+     const graceful = await exitsWithin(exited, 10_000)
+     if (!graceful) child.kill('SIGTERM')
+     if (!await exitsWithin(exited, 5_000)) {
+-      child.kill('SIGKILL')
++      // Last resort before reporting failure: take the child's own process tree with it, so a
++      // Host that ignored both the shutdown request and SIGTERM cannot leave grandchildren behind.
++      this.killTree()
+       if (!await exitsWithin(exited, 5_000)) {
+         throw new Error('dsh desktop host did not exit after SIGKILL')
+       }
 diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
-index 03e6f29a..296d96cb 100644
+index 7a1c935a..b98be426 100644
 --- a/apps/desktop/src/locale.ts
 +++ b/apps/desktop/src/locale.ts
-@@ -86,6 +86,8 @@ export const en = {
+@@ -125,6 +125,8 @@ export const en = {
    mandatoryCopyFailed: 'Copy failed. Select and copy the address below manually.',
    mandatoryAddress: 'Download address',
    mandatoryNotification: 'Return to the application to confirm installation and restart.',
@@ -58,7 +191,7 @@ index 03e6f29a..296d96cb 100644
  } as const
  
  /** Every Desktop locale supplies the complete English key set. */
-@@ -177,6 +179,8 @@ export const zh = {
+@@ -255,6 +257,8 @@ export const zh = {
    mandatoryCopyFailed: '复制失败，请手动选择下方地址复制。',
    mandatoryAddress: '下载地址',
    mandatoryNotification: '返回应用确认安装并重启。',
@@ -68,23 +201,28 @@ index 03e6f29a..296d96cb 100644
  
  /** Locale payload exposed to the Desktop-owned renderer. */
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index d5bfb1e0..861215ab 100644
+index 6690a3c6..82db7f30 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -17,6 +17,8 @@ import {
+@@ -19,6 +19,7 @@ import {
    shell,
    type IpcMainInvokeEvent,
    type MenuItemConstructorOptions,
 +  type Tray,
-+  type WebContents,
  } from 'electron'
  import { resolveDesktopPaths } from './paths.ts'
  import { DesktopProjectManager } from './project-manager.ts'
-@@ -39,11 +41,73 @@ import { DesktopMandatoryUpdateWindow } from './mandatory-update-window.ts'
- import { DesktopPolicyTestAuth } from './policy-test-auth.ts'
+@@ -48,11 +49,26 @@ import { DesktopPolicyTestAuth } from './policy-test-auth.ts'
  import { DesktopUpdateDialog, type UpdateDialogOptions } from './update-dialog.ts'
  import { readDesktopRuntime } from './runtime-tree.ts'
+ import { DesktopBrowserGuests } from './browser-guests.ts'
 +import { createShellTray, shellWindowIcon } from './shell-ui.ts'
++
++/**
++ * Command-line argument that asks a running instance to leave: the installer sends it so the
++ * application can take its own backend down instead of being killed from the outside.
++ */
++const QUIT_ARGUMENT = '--dsh-quit'
  
  let focusPrimaryWindow = (): void => {}
  let stopForRecovery = async (): Promise<void> => {}
@@ -94,119 +232,75 @@ index d5bfb1e0..861215ab 100644
 +let shellTray: Tray | undefined
 +/** Exit code and stderr tail of the last backend that failed, read before its host is released. */
 +let lastBackendDiagnostics = ''
++/** Host child of the running backend; every quit path has to outlive it. */
++let hostProcess: DesktopHostProcess | undefined
 +/** Install-location facts appended to every fatal report; assigned once the paths are resolved. */
 +let fatalLocationFacts = (): string => ''
-+
-+/** Persistent partition owned by the in-app Chat panel; the user's web sign-in lives here. */
-+const CHAT_PARTITION = 'persist:dsh-fenggu-chat'
-+/** Site the in-app Chat panel may load; its sign-in flow stays on this domain family. */
-+const CHAT_SITE = 'deepseek.com'
-+/** The site refuses a client whose user agent says "Electron"; report the bundled Chromium. */
-+const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-+  + `(KHTML, like Gecko) Chrome/${process.versions.chrome ?? '120.0.0.0'} Safari/537.36`
-+
-+/** Whether a URL is inside the single site the in-app Chat panel is allowed to reach. */
-+function isChatUrl(url: string): boolean {
-+  try {
-+    const parsed = new URL(url)
-+    if (parsed.protocol !== 'https:') return false
-+    return parsed.hostname === CHAT_SITE || parsed.hostname.endsWith(`.${CHAT_SITE}`)
-+  } catch {
-+    return false
-+  }
-+}
-+
-+/**
-+ * Pin every `<webview>` of one window to the Chat partition, and refuse anything else.
-+ * @param contents - Renderer allowed to embed the Chat panel.
-+ */
-+function lockDownChatGuests(contents: WebContents): void {
-+  contents.on('will-attach-webview', (event, webPreferences, params) => {
-+    delete webPreferences.preload
-+    webPreferences.nodeIntegration = false
-+    webPreferences.contextIsolation = true
-+    webPreferences.sandbox = true
-+    webPreferences.webSecurity = true
-+    const src = typeof params.src === 'string' ? params.src : ''
-+    if (params.partition !== CHAT_PARTITION || (src !== '' && !isChatUrl(src))) event.preventDefault()
-+  })
-+}
-+
-+/**
-+ * Chat guests get a browser user agent and may never navigate outside the site. `webviewTag` is
-+ * enabled for the application window alone and that window rejects guests outside the Chat
-+ * partition, so every webview in this process is a Chat guest.
-+ */
-+function installChatGuestPolicy(): void {
-+  app.on('web-contents-created', (_event, contents) => {
-+    if (contents.getType() !== 'webview') return
-+    try { contents.session.setUserAgent(BROWSER_USER_AGENT) } catch { /* session already gone */ }
-+    contents.setUserAgent(BROWSER_USER_AGENT)
-+    contents.setWindowOpenHandler(({ url }) => {
-+      if (isChatUrl(url)) void shell.openExternal(url)
-+      return { action: 'deny' }
-+    })
-+    contents.on('will-navigate', (event, url) => {
-+      if (!isChatUrl(url)) event.preventDefault()
-+    })
-+  })
-+}
- 
+ /**
+  * Whether the backend has reached ready: false until the first ready, back to
+  * false when a restart returns it to starting, frozen during shutdown so a
+@@ -69,6 +85,22 @@ app.setAppLogsPath()
  function currentDesktopLocale(): ReturnType<typeof resolveDesktopLocale> {
    return resolveDesktopLocale(windowsLanguage ?? app.getLocale())
-@@ -64,7 +128,12 @@ const recovery = new DesktopFatalRecovery({
- function reportFatal(error: unknown): void {
+ }
++
++/**
++ * Terminate the Host and its own children once the graceful path has had its chance.
++ *
++ * The Host runs as this executable in Node mode and owns subprocesses of its own, so an exit that
++ * skips this leaves a resident backend with no window, no notification-area icon and no way for a
++ * user to stop it — the shape of failure that makes a running installer look stuck. The call is
++ * synchronous because the forced exit and the process-exit hook cannot await anything.
++ */
++function forceStopHost(): void {
++  try { hostProcess?.killTree() } catch (error: unknown) { console.error(error) }
++}
++// A crash or a forced exit never reaches the quit handlers, so the last line of defence is the
++// process itself: whatever path the shell leaves by, the Host tree goes with it.
++process.on('exit', forceStopHost)
++
+ const recovery = new DesktopFatalRecovery({
+   messages: () => currentDesktopLocale().messages,
+   show: options => dialog.showMessageBox(options),
+@@ -100,12 +132,17 @@ function persistCrashReport(error: unknown, source: CrashReportSource): Promise<
+ 
+ function reportFatal(error: unknown, source: CrashReportSource): void {
    console.error(error)
-   if (shuttingDown) return
--  void recovery.report(error).catch((failure: unknown) => { console.error(failure); app.exit(1) })
 +  // The recovery dialog shortens long reports to their last lines, so the reason stays first and
 +  // the install-location facts go last: whatever survives the cut still tells the user where the
-+  // runtime lives and what the backend printed before it stopped.
++  // runtime lives and what the backend printed before it stopped. The crash report keeps them too.
 +  const location = fatalLocationFacts()
 +  const reported = location === '' ? error : new Error(`${desktopErrorState(error).message}\n\n${location}`)
-+  void recovery.report(reported).catch((failure: unknown) => { console.error(failure); app.exit(1) })
+   if (shuttingDown) {
+     // No dialog during shutdown, but the report still records what failed on the way out.
+-    void persistCrashReport(error, source)
++    void persistCrashReport(reported, source)
+     return
+   }
+-  void recovery.report(error, source).catch((failure: unknown) => { console.error(failure); app.exit(1) })
++  void recovery.report(reported, source).catch((failure: unknown) => { console.error(failure); app.exit(1) })
  }
  
  protocol.registerSchemesAsPrivileged([{
-@@ -108,13 +177,15 @@ function developmentHostInspectPort(enabled: boolean): number | undefined {
-   return port
+@@ -183,12 +220,17 @@ function platformLoginUrl(authorizeUrl: string): string {
  }
  
--function createWindow(preload: string, show = false, primary = false): BrowserWindow {
-+function createWindow(preload: string, show = false, primary = false, embed = false): BrowserWindow {
+ function createWindow(preload: string, show = false, primary = false): BrowserWindow {
 +  const icon = shellWindowIcon()
    const window = new BrowserWindow({
      width: 1280,
-     height: 840,
-     minWidth: 880,
+     height: 820,
+     minWidth: 520,
      minHeight: 600,
      show,
++    // The window can appear before its document paints; fill that gap with the same tone the caption
++    // strip uses instead of Electron's default white, which flashes on a dark desktop.
++    backgroundColor: chromeFallbackFill(),
 +    ...(icon === undefined ? {} : { icon }),
      ...(process.platform === 'win32' && primary ? {
        titleBarStyle: 'hidden' as const,
-       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: nativeTheme.shouldUseDarkColors ? '#1b1b1c' : '#f9fafb',
-@@ -137,8 +208,12 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
-       contextIsolation: true,
-       sandbox: true,
-       webSecurity: true,
-+      // The Chat panel hosts the DeepSeek web client in a <webview>. Only the application window
-+      // needs the tag, and lockDownChatGuests below narrows every guest it may attach.
-+      webviewTag: embed,
-     },
-   })
-+  if (embed) lockDownChatGuests(window.webContents)
-   window.webContents.setWindowOpenHandler(({ url }) => {
-     if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
-     return { action: 'deny' }
-@@ -183,6 +258,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
- }
- 
- async function main(): Promise<void> {
-+  installChatGuestPolicy()
-   const journalDirectory = process.env.DSH_DESKTOP_UPDATE_JOURNAL_DIR
-   const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
-   const resources = runtimeResources()
-@@ -220,6 +296,14 @@ async function main(): Promise<void> {
+       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
+@@ -344,6 +386,14 @@ async function main(): Promise<void> {
    }
    const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
    const applicationUrl = `${SCHEME}://app/`
@@ -220,9 +314,9 @@ index d5bfb1e0..861215ab 100644
 +  ].join('\n')
    let hostUrl: string | undefined
    let hostCookie: string | undefined
-   let injections: readonly unknown[] = []
-@@ -247,11 +331,18 @@ async function main(): Promise<void> {
-   }
+   const browserGuests = new DesktopBrowserGuests(() => hostUrl)
+@@ -379,10 +429,18 @@ async function main(): Promise<void> {
+     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US')
    const backend = new DesktopBackendController((onFailure) => {
      const hostInspectPort = developmentHostInspectPort(development)
 +    let hostRef: DesktopHostProcess | undefined
@@ -234,54 +328,93 @@ index d5bfb1e0..861215ab 100644
 +        if (hostRef !== undefined) lastBackendDiagnostics = hostRef.diagnostics()
 +        onFailure(error)
 +      },
-       development ? join(app.getAppPath(), '.desktop-build', 'targets', `${process.platform === 'darwin' ? 'mac' : 'win'}-${process.arch}`, 'runtime', 'primary-runtime')
-         : join(process.resourcesPath, 'runtime', 'primary-runtime'),
-       development ? 'link' : 'runtime', resources)
+       primaryRuntime,
+       resources, (next) => { platformView.setSession(next) })
 +    hostRef = host
++    hostProcess = host
      return {
        start: async () => {
          const ready = await host.start()
-@@ -272,6 +363,7 @@ async function main(): Promise<void> {
+@@ -428,7 +486,10 @@ async function main(): Promise<void> {
      }
    }, (state) => {
-     if (state.phase === 'error') reportFatal(new Error(state.message))
-+    else lastBackendDiagnostics = ''
+     if (state.phase === 'error') reportFatal(state.failure, 'host')
+-    else if (!shuttingDown) backendReady = state.phase === 'ready'
++    else {
++      lastBackendDiagnostics = ''
++      if (!shuttingDown) backendReady = state.phase === 'ready'
++    }
    })
  
    const updateErrors = new WeakMap<DesktopUpdateState, Promise<void>>()
-@@ -573,6 +665,8 @@ async function main(): Promise<void> {
+@@ -483,9 +544,31 @@ async function main(): Promise<void> {
+   }
+   stopForRecovery = () => backend.close()
+ 
++  /**
++   * Put the primary window on screen while the backend is still starting.
++   *
++   * The served application document renders the kernel's own boot page before it waits for the
++   * Host, so the window has something real to show from its first frame. Keeping it hidden until
++   * startup finished made a launch look dead — a notification-area icon, no window, and a tray
++   * entry that ignored clicks — for as long as the backend took.
++   */
++  const revealBootWindow = (): void => {
++    if (quitting || recovery.active || enteredWorkspace) return
++    if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) return
++    const window = mainWindow
++    if (window === undefined || window.isDestroyed() || window.isVisible()) return
++    window.show()
++  }
++
+   const reconcileBackend = (): Promise<void> => {
+     startup ??= (async () => {
+       await navigateMain(applicationUrl)
++      // The served application document draws its own boot page — a spinner that stays up until the
++      // Host answers — so the window has something real to show from its first frame. Waiting for
++      // the backend before showing it (this shell's previous behaviour) is what made a launch look
++      // dead for as long as startup took: tray icon first, no window, and a tray entry that
++      // deliberately ignored clicks until startup finished.
++      revealBootWindow()
+       await backend.start(async () => {
+         await manager.applyRelease()
+       })
+@@ -795,6 +878,9 @@ async function main(): Promise<void> {
      updateSchedule.dispose()
      powerMonitor.off('resume', automaticCheck)
      updates.dispose()
++    forceStopHost()
 +    shellTray?.destroy()
 +    shellTray = undefined
    })
  
    app.setAboutPanelOptions({
-@@ -605,6 +699,17 @@ async function main(): Promise<void> {
-     label: darwin ? app.name : currentDesktopLocale().messages.application,
-     submenu: applicationItems(),
-   }, ...platformMenus]))
+@@ -852,6 +938,22 @@ async function main(): Promise<void> {
+     }, ...platformMenus]))
+   }
+   installMenu()
 +  // The shell owns the lifecycle through the notification area: closing the window keeps the
-+  // backend and its tasks running, and the icon is the only way back or out. Its two entries
-+  // mirror the two commands the shell actually owns; plugin administration lives in the
-+  // application's own plugin page and updates in the application's update prompt.
++  // backend and its tasks running, and the icon is the only way back or out. Its two entries mirror
++  // the two commands the shell actually owns; plugin administration lives in the application's own
++  // plugin page and updates in the application's update prompt.
 +  shellTray = createShellTray({
 +    tooltip: app.name,
-+    openLabel: messages.trayOpen,
-+    quitLabel: messages.trayQuit,
++    openLabel: currentDesktopLocale().messages.trayOpen,
++    quitLabel: currentDesktopLocale().messages.trayQuit,
 +    onOpen: () => { focusPrimaryWindow() },
 +    onQuit: () => { app.quit() },
 +  })
++  // The notification-area entry is the only lifecycle exit and no build machine can click it, so
++  // packaging gets an explicit deadline that runs the very call that entry runs. Nothing else
++  // reaches this path, and the timer only fires while the application is still alive.
++  const quitAfterMs = Number(process.env.DSH_DESKTOP_QUIT_AFTER_MS ?? '')
++  if (Number.isFinite(quitAfterMs) && quitAfterMs > 0) setTimeout(() => { app.quit() }, quitAfterMs)
  
    if (process.platform === 'win32') {
      ipcMain.handle(DESKTOP_IPC.windowsMenu, (event, name: unknown, x: unknown, y: unknown) => {
-@@ -656,8 +761,16 @@ async function main(): Promise<void> {
-   }
- 
+@@ -905,6 +1007,14 @@ async function main(): Promise<void> {
    const createMainWindow = (): BrowserWindow => {
--    const window = createWindow(appPreload, true, true)
-+    const window = createWindow(appPreload, true, true, true)
+     const window = createWindow(appPreload, false, true)
      mainWindow = window
 +    // Closing the window hides it instead of ending the application: the notification-area icon
 +    // and the running tasks stay alive until the tray's Quit entry, the installer's handoff, or
@@ -291,10 +424,22 @@ index d5bfb1e0..861215ab 100644
 +      event.preventDefault()
 +      window.hide()
 +    })
+     browserGuests.bind(window)
      window.on('focus', automaticCheck)
      window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
-     window.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
-@@ -694,7 +807,11 @@ async function main(): Promise<void> {
+@@ -1016,8 +1126,9 @@ async function main(): Promise<void> {
+       void (backend.state.phase === 'ready' ? openInitialWindow() : navigateMain(applicationUrl)).catch((error: unknown) => { reportFatal(error, 'main') })
+       return
+     }
+-    // Startup and sign-out select the visible window before activation may reveal the workspace.
+-    if (window === mainWindow && !enteredWorkspace) return
++    // During startup the primary window already carries the kernel's boot page, and after sign-out
++    // it carries the same document again, so both cases want the window revealed rather than ignored:
++    // this entry is the only way back to an application whose window can be hidden at any moment.
+     if (window.isMinimized()) window.restore()
+     window.show()
+     window.focus()
+@@ -1033,7 +1144,11 @@ async function main(): Promise<void> {
      if (BrowserWindow.getAllWindows().length === 0) focusPrimaryWindow()
    })
    app.on('window-all-closed', () => {
@@ -307,7 +452,32 @@ index d5bfb1e0..861215ab 100644
    })
    app.on('before-quit', (event) => {
      shuttingDown = true
-@@ -718,6 +835,14 @@ async function main(): Promise<void> {
+@@ -1041,11 +1156,17 @@ async function main(): Promise<void> {
+     if (shellInstallerOwnsQuit) {
+       updateDialog.dispose()
+       mandatoryUI?.dispose()
++      // The installer is taking over this machine; it must not find a Host still holding the files.
++      forceStopHost()
+       return
+     }
+     if (quitting) return
+     event.preventDefault()
+     quitting = true
++    // The notification-area icon is the only way out, so quitting has to be unconditional: if the
++    // backend never acknowledges shutdown, force the process to end instead of leaving every window,
++    // the Host and the tray icon alive with no way to stop them.
++    setTimeout(() => { forceStopHost(); app.exit(0) }, 6_000).unref()
+     stopAccount?.()
+     if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) welcomeWindow.hide()
+     if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.hide()
+@@ -1053,12 +1174,20 @@ async function main(): Promise<void> {
+     updateDialog.dispose()
+     mandatoryUI?.dispose()
+     void Promise.all([Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()), backend.close()])
+-      .catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
++      .catch((error: unknown) => { console.error(error) }).finally(() => { forceStopHost(); app.quit() })
+   })
+ 
    mainWindow = createMainWindow()
    const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
    if (typeof manifest !== 'object' || manifest === null) throw new Error('desktop policy: invalid application manifest')
@@ -322,6 +492,24 @@ index d5bfb1e0..861215ab 100644
    const developmentPolicy = app.isPackaged ? undefined : process.env.DSH_DESKTOP_MANDATORY_UPDATE_CONFIG
    const policyInput: unknown = app.isPackaged
      ? ('dshMandatoryUpdatePolicy' in manifest ? manifest.dshMandatoryUpdatePolicy : undefined)
+@@ -1113,7 +1242,16 @@ async function main(): Promise<void> {
+   publishUpdate(updateState)
+ }
+ 
+-const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
++const ownsDesktopInstance = claimDesktopSingleInstance(app, (argv) => {
++  // A later launch either asks this instance to leave (an installer that has to replace the files it
++  // is holding) or asks for its window. The exit is the notification-area entry's own exit, so the
++  // backend and its children go with it.
++  if (argv.includes(QUIT_ARGUMENT)) {
++    app.quit()
++    return
++  }
++  focusPrimaryWindow()
++})
+ 
+ if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {
+   const message = error instanceof Error ? error.message : String(error)
 diff --git a/apps/desktop/src/shell-ui.ts b/apps/desktop/src/shell-ui.ts
 new file mode 100644
 index 00000000..1c81c195
@@ -397,3 +585,42 @@ index 00000000..1c81c195
 +  tray.on('click', options.onOpen)
 +  return tray
 +}
+diff --git a/apps/desktop/src/single-instance.ts b/apps/desktop/src/single-instance.ts
+index 7911b46c..d16a43a4 100644
+--- a/apps/desktop/src/single-instance.ts
++++ b/apps/desktop/src/single-instance.ts
+@@ -4,23 +4,30 @@
+ export interface DesktopSingleInstanceApplication {
+   requestSingleInstanceLock(): boolean
+   quit(): void
+-  on(event: 'second-instance', listener: () => void): unknown
++  on(event: 'second-instance', listener: (event: unknown, argv: readonly string[]) => void): unknown
+ }
+ 
+ /**
+  * Claim the process-lifetime Desktop lock and route later launches to the owner.
+  * @param application - Electron application singleton.
+- * @param focusOwner - focus or recreate the primary window after a later launch.
++ * @param onLaterLaunch - Receives the arguments of every later launch, in the owning process.
+  * @returns true only in the process that may access the Desktop profile.
+  */
+ export function claimDesktopSingleInstance(
+   application: DesktopSingleInstanceApplication,
+-  focusOwner: () => void,
++  onLaterLaunch: (argv: readonly string[]) => void,
+ ): boolean {
+   if (!application.requestSingleInstanceLock()) {
++    // A later launch owns nothing and must not stay resident. Electron defers a quit that arrives
++    // before `ready` until the boot finishes, and a boot that never finishes leaves the process
++    // with no window, no icon and no way for a user to stop it — the leftover that makes an
++    // installer report "application is running" while nothing on screen can be closed. The
++    // deadline below is the exit that cannot be deferred, and it costs nothing when the ordinary
++    // quit wins the race.
+     application.quit()
++    setTimeout(() => { process.exit(0) }, 2_000)
+     return false
+   }
+-  application.on('second-instance', focusOwner)
++  application.on('second-instance', (_event, argv) => { onLaterLaunch(Array.isArray(argv) ? argv : []) })
+   return true
+ }

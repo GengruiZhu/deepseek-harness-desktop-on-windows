@@ -38,7 +38,8 @@ DeepSeek Harness 官方以命令行 / 浏览器方式分发，**并且自带桌�
 
 | 版本 | 特性 |
 | --- | --- |
-| **0.9.1-alpha2**（当前，Latest） | **改用官方 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 桌面壳**（本仓库只做 Windows 打包 + 4 个补丁）；内核 **0.1.6-alpha.2**；补丁补官方没有的：托盘两项 + 关窗常驻、Chat webview（只放行 `deepseek.com` 家族）、黑鲸鱼图标、失败诊断、`DSH_APP_VERSION`；Electron locale 精简 + 7z 最高压缩（**-8.7 MB** → 284 MB）。⚠️ alpha 预发布 |
+| **0.9.2-rc1**（当前，Latest） | 内核升级 **dsh 0.1.7-rc.1**；**Office 转换修好**（引擎换 0.1.0：docx/xlsx/pptx 全部成功，含真实 Excel/PPT）；**修复「装完打不开」**（依赖闭包收集器补齐 link 进来的第一方包依赖，补丁增至 **7 个**）；**重复启动不再留僵尸进程**、**托盘退出杀干净整棵进程树**；**启动时窗口先出来**（窗口可见 2.77 s → **0.55 s**）；安装器遇到「正在运行」改为先 `--dsh-quit` 再 taskkill 兜底。⚠️ rc 候选版 |
+| **0.9.1-alpha2** | **改用官方 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) 桌面壳**（本仓库只做 Windows 打包 + 4 个补丁）；内核 **0.1.6-alpha.2**；补丁补官方没有的：托盘两项 + 关窗常驻、Chat webview（只放行 `deepseek.com` 家族）、黑鲸鱼图标、失败诊断、`DSH_APP_VERSION`；Electron locale 精简 + 7z 最高压缩（**-8.7 MB** → 284 MB） |
 | **0.9.0-alpha1** | 自研壳末代：内核 **0.1.6-alpha.1**；自绘窗口顶栏；子代理驱动改为按需下载（安装包 316 → 157 MB）；自带插件更名 **`ds_zhuzhu_use`**；**宠物资源移出安装包**，改为「设置 → 宠物 → 宠物资源」按需下载（来自 `pet-assets` 分支）；按官方 runtime 文件策略瘦身 |
 | **0.8.1-rc.1** | 内嵌 **DeepSeek 网页版面板**（`chat.deepseek.com`，免开浏览器）+ 会话内容按天归档到 `~/.dsh/web-chat/`；设置新增「会话版本」管理（list / probe / convert / hide / show）；升级可先下载后安装；见**声明：禁止反向代理**。内核 0.1.5-rc.1 |
 | **0.8.0-rc.1** | 内核大版本升级 **dsh 0.1.5-rc.1**：会话格式 V3（⚠️ 不支持降级读取）、`DeepSeek-V41-Flash` 新模型、右侧 Sidebar 重构、任意类型文件上传、可继续子代理排队/Steer；「软件信息」支持**检查更新 / 一键升级 / 回退**（流式下载 + 进度条） |
@@ -51,20 +52,22 @@ DeepSeek Harness 官方以命令行 / 浏览器方式分发，**并且自带桌�
 
 ## 安装
 
-从 **GitHub Releases** 下载最新的安装包（NSIS 安装器；0.9.1-alpha2 约 284 MB）：
+从 **GitHub Releases** 下载最新的安装包（NSIS 安装器；0.9.2-rc1 约 302 MB）：
 
 | 版本线 | 文件名 | 说明 |
 | --- | --- | --- |
-| **0.9.1-alpha2**（当前） | `dsh-0.9.1-alpha2-win-x64.exe` | 官方 `apps/desktop` 桌面壳（product name **dsh**） |
+| **0.9.2-rc1**（当前） | `dsh-0.9.2-rc1-win-x64.exe` | 官方 `apps/desktop` 桌面壳（product name **dsh**） |
+| 0.9.0 / 0.9.1 | `dsh-0.9.*-win-x64.exe` | 同一条线，内核 0.1.6 |
 | 0.8.x / 0.7.x | `DeepSeek Harness Setup <版本>.exe` | 旧自研壳（product name `DeepSeek Harness`） |
 
 1. 双击安装，默认安装到用户目录，可自选路径
 2. 首次启动弹出配置窗口：填入 DeepSeek API Key（`sk-...`，从 [platform.deepseek.com](https://platform.deepseek.com) 获取）
 3. 保存后进入主界面；以后启动自动读取已保存的 Key
 
-> 使用要点：右上角 **X = 关窗常驻**（0.9 起官方桌面壳的托盘行为，服务不中断）；托盘菜单可打开窗口 / 退出。
+> 使用要点：右上角 **X = 关窗常驻**（服务不中断）；托盘菜单可打开窗口 / 退出（**退出会带走整棵进程树**，0.9.2 起）。
+> 安装时若应用正在运行，安装器会先请它自己退出，失败再强制结束（可重试）。
 > 无需预装 Node.js / pnpm / DSH 或任何其他环境。
-> 0.9.1-alpha2 为 alpha 预发布；追求更保守的旧内核可改选 0.7.0（旧自研壳）。
+> 0.9.2-rc1 为候选版；追求更保守的旧内核可改选 0.7.0（旧自研壳）。
 
 ## 项目结构
 

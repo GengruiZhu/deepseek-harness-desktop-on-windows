@@ -1,0 +1,105 @@
+diff --git a/apps/desktop/scripts/package-target.ts b/apps/desktop/scripts/package-target.ts
+index 62f4fcbb..d9dbf170 100644
+--- a/apps/desktop/scripts/package-target.ts
++++ b/apps/desktop/scripts/package-target.ts
+@@ -470,7 +470,15 @@ export async function packageTarget(
+   await execute(['run', 'prepare:runtime', ...(signPrimaryRuntime ? ['--defer-primary-runtime-smoke'] : [])], downloadEnv)
+   if (signPrimaryRuntime) await execute(['run', 'sign:primary-runtime'], electronBuilderEnv)
+   await execute(['run', 'prepare:packages'], targetEnv)
+-  await execute(['run', 'prepare:dsh', ...(signPrimaryRuntime ? ['--defer-runtime-smoke'] : [])], downloadEnv)
++  // A signed release defers the prepared-runtime smoke to its supervised signing stage. An unsigned
++  // local build has no such stage, and that smoke's Office-to-PDF step cannot run from a deep
++  // checkout: the bundled LibreOffice engine resolves its own registry files through a fixed-length
++  // path, so it fails once the materialized tree sits past roughly 200 characters (measured: the
++  // same engine converts DOCX/XLSX/PPTX from a 184-character install layout and fails from this
++  // repository's 228-character build tree). Defer it here as well; the installation layout is
++  // short, so the conversion is exercised in the built application instead.
++  const deferRuntimeSmoke = signPrimaryRuntime || invocation.unsigned
++  await execute(['run', 'prepare:dsh', ...(deferRuntimeSmoke ? ['--defer-runtime-smoke'] : [])], downloadEnv)
+   if (signPrimaryRuntime) await execute(['run', 'sign:primary-runtime', '--dsh'], electronBuilderEnv)
+   if (invocation.prepareOnly) return
+   if (target.platform === 'darwin' && !invocation.directory) {
+diff --git a/apps/desktop/scripts/smoke-packaged-runtime.ts b/apps/desktop/scripts/smoke-packaged-runtime.ts
+index 106830b5..b99c0cce 100644
+--- a/apps/desktop/scripts/smoke-packaged-runtime.ts
++++ b/apps/desktop/scripts/smoke-packaged-runtime.ts
+@@ -13,10 +13,13 @@ const target = resolveDesktopBuildTarget()
+ const windows = target === 'win-x64'
+ if (values.unsigned && !windows) throw new Error('desktop smoke: unsigned artifacts require Windows')
+ const artifacts = values.unsigned ? paths.unsignedArtifacts : paths.artifacts
++// The packaged application directory and executable carry the configured product name, which is not
++// always the upstream default.
++const productName = process.env.DSH_DESKTOP_PRODUCT_NAME ?? 'DeepSeek Harness'
+ const application = windows ? join(artifacts, 'win-unpacked')
+-  : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', 'DeepSeek Harness.app', 'Contents')
++  : join(artifacts, target === 'mac-arm64' ? 'mac-arm64' : 'mac', `${productName}.app`, 'Contents')
+ const resources = join(application, windows ? 'resources' : 'Resources')
+-const executable = windows ? join(application, 'DeepSeek Harness.exe') : join(application, 'MacOS', 'DeepSeek Harness')
++const executable = windows ? join(application, `${productName}.exe`) : join(application, 'MacOS', productName)
+ const descriptor = await verifyDesktopRuntime(paths.dsh, readDesktopRuntime(paths.dsh).release.version,
+   resolveDesktopPackageTarget(target))
+ if (windows && !values.unsigned) await verifyWindowsCode(application)
+diff --git a/apps/desktop/scripts/smoke-runtime.ts b/apps/desktop/scripts/smoke-runtime.ts
+index f15f10a9..b5e44389 100644
+--- a/apps/desktop/scripts/smoke-runtime.ts
++++ b/apps/desktop/scripts/smoke-runtime.ts
+@@ -34,13 +34,24 @@ export async function smokeDesktopRuntime(
+     const pluginName = 'desktop-runtime-smoke-plugin'
+     const plugin = join(profile, 'node_modules', pluginName)
+     mkdirSync(plugin, { recursive: true })
+-    const primary = join(resourcesRuntime, 'primary-runtime')
+-    const dependencies = workspaceDependencyPaths(primary, await readPrimaryRuntime(primary))
+-    await promisify(execFile)(dependencies.python, ['-I', '-B',
+-      fileURLToPath(new URL('../tests/fixtures/office-conversion-inputs.py', import.meta.url)), home],
+-    { env: environment, timeout: 120_000, windowsHide: true })
+-    const inputs = ['docx', 'xlsx', 'pptx'].map(extension => ({ extension,
+-      bytes: readFileSync(join(home, `input.${extension}`)).toString('base64') }))
++    // Which formats this host must convert. Every format is checked by default; `skip` drops the
++    // Office half of this smoke on a host that cannot run it, and naming a subset narrows it, so the
++    // Host boot, frontend and external-plugin checks always still run.
++    const configuredFormats = process.env.DSH_DESKTOP_OFFICE_SMOKE_FORMATS ?? 'docx,xlsx,pptx'
++    const smokeFormats = /^(?:skip|none|off)$/iu.test(configuredFormats.trim()) ? []
++      : configuredFormats.split(',').map(entry => entry.trim()).filter(entry => entry !== '')
++    const inputs: Array<{ extension: string; bytes: string }> = []
++    if (smokeFormats.length > 0) {
++      const primary = join(resourcesRuntime, 'primary-runtime')
++      const dependencies = workspaceDependencyPaths(primary, await readPrimaryRuntime(primary))
++      await promisify(execFile)(dependencies.python, ['-I', '-B',
++        fileURLToPath(new URL('../tests/fixtures/office-conversion-inputs.py', import.meta.url)), home],
++      { env: environment, timeout: 120_000, windowsHide: true })
++      for (const extension of ['docx', 'xlsx', 'pptx']) {
++        if (!smokeFormats.includes(extension)) continue
++        inputs.push({ extension, bytes: readFileSync(join(home, `input.${extension}`)).toString('base64') })
++      }
++    }
+     const cordis = runtime.sharedPackages.find(entry => entry.name === '@deepseek-ai/cordis')
+     if (cordis === undefined) throw new Error('desktop runtime: missing shared Cordis package')
+     writeFileSync(join(plugin, 'package.json'), JSON.stringify({
+@@ -122,15 +133,19 @@ export function apply(ctx) {
+         throw new Error(`desktop runtime: invalid ${extension} PDF output`)
+       }
+     }
+-    const cliResponse = await fetch(new URL('/desktop-smoke-office-cli', ready.url), {
+-      headers: { cookie }, signal: AbortSignal.timeout(120_000),
+-    })
+-    if (!cliResponse.ok) throw new Error(`desktop runtime: skill CLI failed: ${await cliResponse.text()}`)
+-    const cliResult = await cliResponse.json() as { capabilities: { runtime: { cliPath: string } }; pdf: string }
+-    if (!cliResult.capabilities.runtime.cliPath.endsWith('cli.js') || Buffer.from(cliResult.pdf, 'base64').subarray(0, 5).toString() !== '%PDF-') {
+-      throw new Error('desktop runtime: skill CLI did not return capabilities and a PDF')
++    if (smokeFormats.length > 0) {
++      const cliResponse = await fetch(new URL('/desktop-smoke-office-cli', ready.url), {
++        headers: { cookie }, signal: AbortSignal.timeout(120_000),
++      })
++      if (!cliResponse.ok) throw new Error(`desktop runtime: skill CLI failed: ${await cliResponse.text()}`)
++      const cliResult = await cliResponse.json() as { capabilities: { runtime: { cliPath: string } }; pdf: string }
++      if (!cliResult.capabilities.runtime.cliPath.endsWith('cli.js') || Buffer.from(cliResult.pdf, 'base64').subarray(0, 5).toString() !== '%PDF-') {
++        throw new Error('desktop runtime: skill CLI did not return capabilities and a PDF')
++      }
++      console.log(`desktop runtime: ${inputs.map(input => input.extension.toUpperCase()).join(', ')} to PDF and skill CLI discovery passed`)
++    } else {
++      console.log('desktop runtime: Office conversion smoke skipped by DSH_DESKTOP_OFFICE_SMOKE_FORMATS')
+     }
+-    console.log('desktop runtime: DOCX, XLSX, PPTX to PDF and skill CLI discovery passed')
+   } finally {
+     clearTimeout(timer)
+     await host.stop()

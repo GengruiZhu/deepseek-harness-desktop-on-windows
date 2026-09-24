@@ -1,0 +1,118 @@
+diff --git a/apps/desktop/installer/strings.nsh b/apps/desktop/installer/strings.nsh
+index f2f2b081..f8249bd7 100644
+--- a/apps/desktop/installer/strings.nsh
++++ b/apps/desktop/installer/strings.nsh
+@@ -29,6 +29,12 @@ LangString INSTALLER_FAILED ${LANG_ENGLISH} "Installation did not finish. Close
+ LangString INSTALLER_FAILED ${LANG_SIMPCHINESE} "安装未完成，请关闭安装程序后重试。如仍然失败，请重新下载安装包。"
+ LangString INSTALLER_RUNNING ${LANG_ENGLISH} "DeepSeek Harness is running. Close the application, then run this installer again."
+ LangString INSTALLER_RUNNING ${LANG_SIMPCHINESE} "DeepSeek Harness 正在运行。请先关闭应用，再重新运行安装程序。"
++LangString INSTALLER_STOPPING ${LANG_ENGLISH} "Stopping the running DeepSeek Harness…"
++LangString INSTALLER_STOPPING ${LANG_SIMPCHINESE} "正在结束正在运行的 DeepSeek Harness…"
++LangString INSTALLER_STOP_ASK ${LANG_ENGLISH} "DeepSeek Harness is still running in the background; closing its window only hides it to the notification area. Click Retry to stop it and continue installing, or Cancel to stop installing."
++LangString INSTALLER_STOP_ASK ${LANG_SIMPCHINESE} "DeepSeek Harness 还在后台运行（关闭窗口只会把它收进托盘）。点“重试”结束它并继续安装，点“取消”退出安装。"
++LangString INSTALLER_STOP_STUCK ${LANG_ENGLISH} "DeepSeek Harness could not be stopped automatically. The last tool output is shown below; you can also end every dsh.exe process in Task Manager, then click Retry."
++LangString INSTALLER_STOP_STUCK ${LANG_SIMPCHINESE} "自动结束 DeepSeek Harness 失败。下面附上最后一次工具的原始输出；你也可以在任务管理器里结束所有 dsh.exe，再点“重试”。"
+ LangString INSTALLER_PATH_INVALID ${LANG_ENGLISH} "Choose a full local folder path. Drive roots, system folders, links and special characters are not supported."
+ LangString INSTALLER_PATH_INVALID ${LANG_SIMPCHINESE} "请选择本地磁盘上的完整文件夹路径，不能使用磁盘根目录、系统目录、链接目录或包含特殊字符的路径。"
+ LangString INSTALLER_PATH_OWNERSHIP ${LANG_ENGLISH} "Choose an empty folder or the registered DeepSeek Harness installation folder."
+diff --git a/apps/desktop/scripts/installer.nsh b/apps/desktop/scripts/installer.nsh
+index 59802878..0d256e76 100644
+--- a/apps/desktop/scripts/installer.nsh
++++ b/apps/desktop/scripts/installer.nsh
+@@ -168,20 +168,92 @@ ManifestDPIAware true
+   System::Call '$PLUGINSDIR\window-frame.dll::InstallerFindProcess(w "$INSTDIR\${APP_EXECUTABLE_FILENAME}") i.R0 ?c'
+   ${If} $R0 == 0
+     ${If} ${isUpdated}
++      ; An ordinary update may already be shutting the application down; give that a head start.
+       StrCpy $R1 0
+       ${DoWhile} $R0 == 0
+         Sleep 250
+         System::Call '$PLUGINSDIR\window-frame.dll::InstallerFindProcess(w "$INSTDIR\${APP_EXECUTABLE_FILENAME}") i.R0 ?c'
+         IntOp $R1 $R1 + 1
+-        ${If} $R1 >= 40
++        ${If} $R1 >= 12
+           ${ExitDo}
+         ${EndIf}
+       ${Loop}
+     ${EndIf}
+     ${If} $R0 == 0
+-      MessageBox MB_OK|MB_ICONINFORMATION "$(INSTALLER_RUNNING)" /SD IDOK
+-      SetErrorLevel 2
+-      Quit
++      ; The shell is resident in the notification area, so closing its window does not end the
++      ; process and "close the application" is not an instruction a user can complete. Ask once,
++      ; then stop it by three independent means; Retry re-runs the whole sequence, because the one
++      ; tool that fails is a transient condition (a busy security scanner, a locked file, an image
++      ; name the shell does not own) and the user should not have to restart the installer for it.
++      ; A silent install takes the default, which is "stop it".
++      dsh_stop_ask:
++      MessageBox MB_RETRYCANCEL|MB_ICONQUESTION "$(INSTALLER_STOP_ASK)" /SD IDRETRY IDCANCEL dsh_stop_abort
++      DetailPrint "$(INSTALLER_STOPPING)"
++      StrCpy $R3 ""
++
++      ; 1. Ask the application to leave through its own lifecycle: this is the same exit its
++      ;    notification-area menu performs, and it takes the backend's process tree with it.
++      nsExec::ExecToStack '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --dsh-quit'
++      Pop $R2
++      Pop $R3
++      StrCpy $R1 0
++      ${DoWhile} $R0 == 0
++        Sleep 250
++        System::Call '$PLUGINSDIR\window-frame.dll::InstallerFindProcess(w "$INSTDIR\${APP_EXECUTABLE_FILENAME}") i.R0 ?c'
++        IntOp $R1 $R1 + 1
++        ${If} $R1 >= 32
++          ${ExitDo}
++        ${EndIf}
++      ${Loop}
++
++      ${If} $R0 == 0
++        ; 2. Take the executable's whole process tree, while its own processes are still alive to be
++        ;    walked: this is what reaches the backend's grandchildren (plugin servers, terminals) that
++        ;    would otherwise keep handles on files inside this installation.
++        nsExec::ExecToStack '"$SYSDIR\taskkill.exe" /IM "${APP_EXECUTABLE_FILENAME}" /T /F'
++        Pop $R2
++        Pop $R3
++        StrCpy $R1 0
++        ${DoWhile} $R0 == 0
++          Sleep 250
++          System::Call '$PLUGINSDIR\window-frame.dll::InstallerFindProcess(w "$INSTDIR\${APP_EXECUTABLE_FILENAME}") i.R0 ?c'
++          IntOp $R1 $R1 + 1
++          ${If} $R1 >= 32
++            ${ExitDo}
++          ${EndIf}
++        ${Loop}
++      ${EndIf}
++
++      ${If} $R0 == 0
++        ; 3. Last resort: stop every process whose image lives under this installation directory, which
++        ;    does not depend on the image name at all. Same technique electron-builder's installer uses.
++        StrCpy $R4 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | ? { $$_.Path -and $$_.Path.StartsWith('$INSTDIR\', 'CurrentCultureIgnoreCase') } | % { Stop-Process -Id $$_.ProcessId -Force }"`
++        nsExec::ExecToStack "$R4"
++        Pop $R2
++        Pop $R3
++        StrCpy $R1 0
++        ${DoWhile} $R0 == 0
++          Sleep 250
++          System::Call '$PLUGINSDIR\window-frame.dll::InstallerFindProcess(w "$INSTDIR\${APP_EXECUTABLE_FILENAME}") i.R0 ?c'
++          IntOp $R1 $R1 + 1
++          ${If} $R1 >= 32
++            ${ExitDo}
++          ${EndIf}
++        ${Loop}
++      ${EndIf}
++
++      ${If} $R0 == 0
++        ; Report what the tools said instead of only saying that nothing worked: that output is what
++        ; turns the next report into a diagnosis.
++        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(INSTALLER_STOP_STUCK)$\r$\n$\r$\n$R3" /SD IDCANCEL IDRETRY dsh_stop_ask
++        SetErrorLevel 2
++        Quit
++      ${EndIf}
++      Goto dsh_stop_continue
++      dsh_stop_abort:
++        SetErrorLevel 2
++        Quit
++      dsh_stop_continue:
+     ${EndIf}
+   ${EndIf}
+   ${If} $R0 < 0

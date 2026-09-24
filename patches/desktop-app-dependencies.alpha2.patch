@@ -1,0 +1,64 @@
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index e47bc661..ce3630ee 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -40,13 +40,14 @@
+     "semver": "^7.8.5",
+     "ws": "^8.21.0",
+     "@deepseek-ai/dsh-api-gateway": "workspace:*",
++    "@deepseek-ai/dsh-app-boot": "workspace:*",
++    "@deepseek-ai/dsh-deepseek-account": "workspace:*",
++    "@deepseek-ai/dsh-home-paths": "workspace:*",
+     "@deepseek-ai/cordis": "workspace:~"
+   },
+   "devDependencies": {
+-    "@deepseek-ai/dsh-app-boot": "workspace:*",
+     "@deepseek-ai/dsh-client-ui-settings-general": "workspace:*",
+     "@deepseek-ai/dsh-client-ui-sidebar-browser": "workspace:*",
+-    "@deepseek-ai/dsh-home-paths": "workspace:*",
+     "@deepseek-ai/node-addon-system": "workspace:~",
+     "@electron/get": "^5.1.0",
+     "@electron/notarize": "2.5.0",
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 9d834a61..6be0f115 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -566,6 +566,15 @@ importers:
+       '@deepseek-ai/dsh-api-gateway':
+         specifier: workspace:*
+         version: link:../../packages/api/gateway
++      '@deepseek-ai/dsh-app-boot':
++        specifier: workspace:*
++        version: link:../../packages/boot/app-boot
++      '@deepseek-ai/dsh-deepseek-account':
++        specifier: workspace:*
++        version: link:../../packages/credentials/deepseek-account
++      '@deepseek-ai/dsh-home-paths':
++        specifier: workspace:*
++        version: link:../../packages/util/home-paths
+       electron-updater:
+         specifier: ^6.8.9
+         version: 6.8.9
+@@ -576,9 +585,6 @@ importers:
+         specifier: ^8.21.0
+         version: 8.21.0
+     devDependencies:
+-      '@deepseek-ai/dsh-app-boot':
+-        specifier: workspace:*
+-        version: link:../../packages/boot/app-boot
+       '@deepseek-ai/dsh-client-ui-primitives':
+         specifier: workspace:*
+         version: link:../../packages/client/ui-primitives
+@@ -591,12 +597,6 @@ importers:
+       '@deepseek-ai/dsh-client-ui-theme':
+         specifier: workspace:*
+         version: link:../../packages/client/ui-theme
+-      '@deepseek-ai/dsh-deepseek-account':
+-        specifier: workspace:*
+-        version: link:../../packages/credentials/deepseek-account
+-      '@deepseek-ai/dsh-home-paths':
+-        specifier: workspace:*
+-        version: link:../../packages/util/home-paths
+       '@deepseek-ai/node-addon-system':
+         specifier: workspace:~
+         version: link:../../native/system/packages/entry

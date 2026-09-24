@@ -1,22 +1,157 @@
+diff --git a/apps/desktop/scripts/collect-app-dependencies.mjs b/apps/desktop/scripts/collect-app-dependencies.mjs
+new file mode 100644
+index 00000000..35345f0b
+--- /dev/null
++++ b/apps/desktop/scripts/collect-app-dependencies.mjs
+@@ -0,0 +1,126 @@
++/**
++ * Collect the package directories the packaged application must carry.
++ *
++ * electron-builder collects the application's production dependencies from package.json, but this
++ * workspace links first-party packages (`link:`/`workspace:`), and a linked package's own
++ * dependencies live in ITS node_modules rather than in the application's. Those nested dependencies
++ * therefore never reach `app.asar/node_modules`, and the packaged application fails at startup with
++ * `ERR_MODULE_NOT_FOUND` for e.g. `@deepseek-ai/cordis-plugin-loader` — which is invisible on the
++ * build host, where Node happily resolves the missing package from the repository above the output
++ * directory.
++ *
++ * This walks from the application's own built files through every bare specifier they reach,
++ * resolving with the application's own module resolution so pnpm's links are followed, and returns
++ * one directory per package. The caller adds them as electron-builder file sets.
++ */
++
++import { readFileSync, readdirSync, statSync } from 'node:fs'
++import { createRequire } from 'node:module'
++import { dirname, join, sep } from 'node:path'
++
++/** Modules the Node runtime provides; they must never be copied into the application. */
++const BUILTINS = new Set(['assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console', 'constants',
++  'crypto', 'dgram', 'diagnostics_channel', 'dns', 'domain', 'events', 'fs', 'http', 'http2', 'https', 'inspector',
++  'module', 'net', 'os', 'path', 'perf_hooks', 'process', 'punycode', 'querystring', 'readline', 'repl', 'stream',
++  'string_decoder', 'sys', 'timers', 'tls', 'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'wasi',
++  'worker_threads', 'zlib'])
++
++/** Specifiers the Electron runtime itself provides to the main process and preloads. */
++const PROVIDED = new Set(['electron'])
++
++const SPECIFIER = /(?:^|[^\w.$])(?:import|export)[^'"`]*?from\s*["']([^"']+)["']|(?:^|[^\w.$])require\(\s*["']([^"']+)["']\s*\)|(?:^|[^\w.$])import\(\s*["']([^"']+)["']\s*\)/gu
++
++const packageNameOf = specifier => {
++  const parts = specifier.split('/')
++  return specifier.startsWith('@') ? `${parts[0]}/${parts[1]}` : parts[0]
++}
++
++/** Every ".js"/".cjs"/".mjs" file below one directory, skipping nested node_modules. */
++function scriptFiles(root, depth = 0) {
++  const found = []
++  if (depth > 6) return found
++  let entries
++  try { entries = readdirSync(root, { withFileTypes: true }) } catch { return found }
++  for (const entry of entries) {
++    const path = join(root, entry.name)
++    if (entry.isDirectory()) {
++      if (entry.name === 'node_modules') continue
++      found.push(...scriptFiles(path, depth + 1))
++      continue
++    }
++    if (entry.isFile() && /\.(?:js|cjs|mjs)$/u.test(entry.name)) found.push(path)
++  }
++  return found
++}
++
++function packageRootOf(resolved, name) {
++  let current = dirname(resolved)
++  for (;;) {
++    try {
++      const manifest = JSON.parse(readFileSync(join(current, 'package.json'), 'utf8'))
++      if (manifest.name === name) return current
++    } catch { /* keep walking up */ }
++    const parent = dirname(current)
++    if (parent === current || current.endsWith(`${sep}node_modules`)) return dirname(resolved)
++    current = parent
++  }
++}
++
++/**
++ * @param {string} appRoot - Desktop application directory.
++ * @param {readonly string[]} extraRoots - Additional directories to seed the walk (built renderer assets).
++ * @returns {Map<string, string>} package name to its directory on this build host.
++ */
++export function collectApplicationPackages(appRoot, extraRoots = []) {
++  const packages = new Map()
++  const requires = new Map()
++  // Resolve each specifier the way Node does for that file: a linked package's own dependencies
++  // only resolve from inside it, not from the application root.
++  const requireOf = file => {
++    const directory = dirname(file)
++    let created = requires.get(directory)
++    if (created === undefined) {
++      created = createRequire(file)
++      requires.set(directory, created)
++    }
++    return created
++  }
++  const scanned = new Set()
++  const queue = []
++  const enqueue = path => {
++    if (scanned.has(path)) return
++    scanned.add(path)
++    queue.push(path)
++  }
++
++  for (const file of [...scriptFiles(join(appRoot, 'lib')), ...extraRoots.flatMap(root => scriptFiles(root))]) {
++    enqueue(file)
++  }
++
++  while (queue.length > 0) {
++    const file = queue.pop()
++    let text
++    try { text = readFileSync(file, 'utf8') } catch { continue }
++    for (const match of text.matchAll(SPECIFIER)) {
++      const specifier = match[1] ?? match[2] ?? match[3]
++      if (specifier === undefined) continue
++      if (specifier.startsWith('.') || specifier.startsWith('node:') || specifier.startsWith('data:')) continue
++      // Subpath imports ("#internal") and bundler placeholder specifiers have no package to copy.
++      if (specifier.startsWith('#')) continue
++      const name = packageNameOf(specifier)
++      if (BUILTINS.has(name) || PROVIDED.has(name)) continue
++
++      let resolved
++      try { resolved = requireOf(file).resolve(`${name}/package.json`) }
++      catch {
++        try { resolved = requireOf(file).resolve(specifier) } catch { continue }
++      }
++      const root = packageRootOf(resolved, name)
++      if (packages.has(name)) continue
++      packages.set(name, root)
++      for (const entry of scriptFiles(root)) enqueue(entry)
++    }
++  }
++
++  return packages
++}
 diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
-index ea33c60b..da62ecbe 100644
+index e0a707dc..77e138a0 100644
 --- a/apps/desktop/scripts/electron-builder-config.mjs
 +++ b/apps/desktop/scripts/electron-builder-config.mjs
-@@ -1,4 +1,5 @@
- import { join } from 'node:path'
-+import { existsSync, readdirSync, rmSync } from 'node:fs'
+@@ -1,6 +1,7 @@
+ import { officePackageDirectories } from '../../../scripts/libreoffice-packages.mjs'
++import { collectApplicationPackages } from './collect-app-dependencies.mjs'
+ import { X509Certificate } from 'node:crypto'
+-import { readFileSync } from 'node:fs'
++import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+ import { readFile } from 'node:fs/promises'
+ import { join, relative, sep } from 'node:path'
  import { fileURLToPath } from 'node:url'
- import { execFile } from 'node:child_process'
- import { promisify } from 'node:util'
-@@ -41,7 +42,6 @@ export function createElectronBuilderConfig(
-   preparedRuntime = undefined,
+@@ -51,7 +52,6 @@ export function createElectronBuilderConfig(
+   preparedRuntimeVersion = undefined,
  ) {
    const appId = resolveDesktopAppId(env)
 -  const policy = resolveDesktopPolicyEnvironment(env)
    const targetPlatform = env.DSH_DESKTOP_TARGET_PLATFORM
    const resolvedPlatform = targetPlatform ?? hostPlatform
    const resolvedArch = env.DSH_DESKTOP_TARGET_ARCH ?? hostArch
-@@ -50,6 +50,10 @@ export function createElectronBuilderConfig(
+@@ -60,6 +60,10 @@ export function createElectronBuilderConfig(
    }
    const unsigned = env.DSH_DESKTOP_UNSIGNED === '1'
    if (unsigned && resolvedPlatform !== 'win32') throw new Error('desktop package: unsigned builds require Windows')
@@ -27,23 +162,40 @@ index ea33c60b..da62ecbe 100644
    const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
    const packagesWindows = resolvedPlatform === 'win32'
    if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
-@@ -77,11 +81,21 @@ export function createElectronBuilderConfig(
-   if (preparedRuntime !== undefined) buildPaths.dsh = preparedRuntime
+@@ -97,20 +101,39 @@ export function createElectronBuilderConfig(
+   const productVersion = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')).version
+   const buildVersion = resolveDesktopBuildVersion(env, productVersion)
+   const packaged = resolveDesktopBuildCommit(env)
++  // First-party packages are linked into this workspace, so their own dependencies live in their
++  // node_modules instead of the application's and never reach the archive through electron-builder's
++  // production collection. Ship the whole reachable closure explicitly; otherwise the packaged
++  // application fails at startup with ERR_MODULE_NOT_FOUND for a linked package's dependency.
++  const applicationPackages = collectApplicationPackages(fileURLToPath(new URL('..', import.meta.url)))
++  const applicationPackageFiles = [...applicationPackages].map(([name, directory]) => ({
++    from: directory,
++    to: `node_modules/${name}`,
++    filter: ['**/*'],
++  }))
    return {
      appId,
--    extraMetadata: { dshDesktopAppId: appId, dshMandatoryUpdatePolicy: policy },
--    productName: 'DeepSeek Harness',
--    artifactName: 'deepseek-harness-${version}-${os}-${arch}.${ext}',
-+    extraMetadata: {
-+      dshDesktopAppId: appId,
-+      dshMandatoryUpdatePolicy: policy,
-+      // The shell's own release label. The packaged version stays the bundled kernel's version,
-+      // so this is the only place the published installer version can reach the application.
+     protocols: [{ name: 'DeepSeek Harness', schemes: ['dsh'] }],
+     extraMetadata: {
+       dshDesktopAppId: appId,
+       dshMandatoryUpdatePolicy: policy,
++      // The shell's own release label. The packaged version stays the bundled kernel's version
++      // (a build version may only extend that version), so this is the only place the published
++      // installer version can reach the application.
 +      dshDesktopReleaseLabel: env.DSH_DESKTOP_RELEASE_LABEL,
-+    },
+       ...buildVersion === productVersion ? {} : { version: buildVersion },
+       ...packaged === undefined ? {} : { dshBuildCommit: packaged.commit, dshBuildDirty: packaged.dirty },
+     },
+-    productName: 'DeepSeek Harness',
 +    productName: env.DSH_DESKTOP_PRODUCT_NAME ?? 'DeepSeek Harness',
-+    artifactName: env.DSH_DESKTOP_ARTIFACT_NAME ?? 'deepseek-harness-${version}-${os}-${arch}.${ext}',
-     directories: { output: unsigned ? join(buildPaths.root, 'unsigned-artifacts') : buildPaths.artifacts },
+     // Unsigned builds carry their own suffix so a shared file can never pass for a release artifact.
+-    artifactName: `deepseek-harness-\${version}-\${os}-\${arch}${unsigned ? '-unsigned' : ''}.\${ext}`,
++    artifactName: env.DSH_DESKTOP_ARTIFACT_NAME
++      ?? `deepseek-harness-\${version}-\${os}-\${arch}${unsigned ? '-unsigned' : ''}.\${ext}`,
+     directories: { output: unsigned ? buildPaths.unsignedArtifacts : buildPaths.artifacts },
      asar: true,
 +    // The payload is dominated by the bundled LibreOffice engine and the Python/Node interpreter
 +    // runtime, so the archive and installer get the strongest 7z level: same bytes in, smaller
@@ -52,8 +204,13 @@ index ea33c60b..da62ecbe 100644
      electronDist: buildPaths.electron,
      electronFuses: { runAsNode: true },
      beforeBuild: async () => {
-@@ -116,7 +130,9 @@ export function createElectronBuilderConfig(
+@@ -139,11 +162,14 @@ export function createElectronBuilderConfig(
+       { from: buildPaths.dsh, to: 'dsh', filter: ['**/*'] },
+       // electron-builder excludes a source directory's root node_modules.
+       { from: join(buildPaths.dsh, 'node_modules'), to: 'dsh/node_modules', filter: ['**/*'] },
++      ...applicationPackageFiles,
      ],
+     asarUnpack: unpack,
      extraResources: [
        { from: buildPaths.runtime, to: 'runtime' },
 -      { from: fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)), to: 'icon.png' },
@@ -63,9 +220,9 @@ index ea33c60b..da62ecbe 100644
      ],
      mac: {
        icon: fileURLToPath(new URL('../resources/icon-macos.png', import.meta.url)),
-@@ -142,6 +158,17 @@ export function createElectronBuilderConfig(
+@@ -180,6 +206,17 @@ export function createElectronBuilderConfig(
      afterPack: async context => {
-       const { verifyDesktopRuntime, writeDesktopRuntime } = await import('../lib/types/runtime-tree.js')
+       const { verifyDesktopRuntime } = await import('../lib/types/runtime-tree.js')
        const resourcesDir = context.packager.getResourcesDir(context.appOutDir)
 +      // Electron ships a resource pack for every locale it speaks; this application ships exactly
 +      // two dictionaries (see src/locale.ts), so the other ~50 packs are only installer weight.
@@ -81,7 +238,7 @@ index ea33c60b..da62ecbe 100644
        if (resolvedPlatform === 'darwin' && update !== undefined) {
          await writeMacOSAppUpdateConfig(resourcesDir, resolveMacOSAppUpdateFeed(context.packager.config.publish),
            context.packager.appInfo.updaterCacheDirName)
-@@ -174,7 +201,7 @@ export function createElectronBuilderConfig(
+@@ -217,7 +254,7 @@ export function createElectronBuilderConfig(
        )
      },
      win: {

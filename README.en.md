@@ -38,7 +38,8 @@ Since 0.8.1 the app embeds the DeepSeek web app (`chat.deepseek.com`) in the lef
 
 | Version | Features |
 | --- | --- |
-| **0.9.1-alpha2** (current, Latest) | **Switched to the official [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) shell** (this repo only adds Windows packaging + 4 patches); kernel **0.1.6-alpha.2**; patches add what upstream lacks: two tray entries + close-to-tray, Chat webview (`deepseek.com` family only), black-whale icon, failure diagnostics, `DSH_APP_VERSION`; trimmed Electron locales + maximum 7z compression (**-8.7 MB** → 284 MB). ⚠️ alpha prerelease |
+| **0.9.2-rc1** (current, Latest) | Kernel upgraded to **dsh 0.1.7-rc.1**; **Office conversion fixed** (engine 0.1.0: docx/xlsx/pptx all succeed, incl. real Excel/PPT files); **"installs but won't start" fixed** (dependency-closure collector restores link-ed first-party deps; patches now **7**); **no more zombie processes on repeated launches**, **tray quit kills the whole process tree**; **window shows before the backend is ready** (visible at 2.77 s → **0.55 s**); installer now asks the app to quit (`--dsh-quit`) with taskkill as fallback. ⚠️ RC |
+| **0.9.1-alpha2** | **Switched to the official [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop) shell** (this repo only adds Windows packaging + 4 patches); kernel **0.1.6-alpha.2**; patches add what upstream lacks: two tray entries + close-to-tray, Chat webview (`deepseek.com` family only), black-whale icon, failure diagnostics, `DSH_APP_VERSION`; trimmed Electron locales + maximum 7z compression (**-8.7 MB** → 284 MB) |
 | **0.9.0-alpha1** | Last of the self-made shell: kernel **0.1.6-alpha.1**; hand-drawn titlebar; on-demand subagent drivers (installer 316 → 157 MB); plugin renamed **`ds_zhuzhu_use`**; pet assets moved out of the installer into "Settings → Pets → Pet resources" (from the `pet-assets` branch) |
 | **0.8.1-rc.1** | Embedded **DeepSeek web panel** (`chat.deepseek.com`, no browser tab needed) with per-day local archiving to `~/.dsh/web-chat/`; "Session versions" management in Settings; download-then-install upgrade flow; see **Notice: No Reverse Proxying**. Kernel 0.1.5-rc.1 |
 | **0.8.0-rc.1** | Major kernel upgrade to **dsh 0.1.5-rc.1**: session format V3 (⚠️ no downgrade reads), `DeepSeek-V41-Flash` model, reworked right Sidebar, arbitrary file uploads, subagent queue/steer; in-app **check updates / one-click upgrade / rollback** (streamed download with progress) |
@@ -51,20 +52,22 @@ Full changelog: [CHANGELOG.md](CHANGELOG.md) (Chinese)
 
 ## Installation
 
-Download the latest installer from **GitHub Releases** (NSIS installer; ~284 MB for 0.9.1-alpha2):
+Download the latest installer from **GitHub Releases** (NSIS installer; ~302 MB for 0.9.2-rc1):
 
 | Line | File name | Notes |
 | --- | --- | --- |
-| **0.9.1-alpha2** (current) | `dsh-0.9.1-alpha2-win-x64.exe` | official `apps/desktop` shell (product name **dsh**) |
+| **0.9.2-rc1** (current) | `dsh-0.9.2-rc1-win-x64.exe` | official `apps/desktop` shell (product name **dsh**) |
+| 0.9.0 / 0.9.1 | `dsh-0.9.*-win-x64.exe` | same line, kernel 0.1.6 |
 | 0.8.x / 0.7.x | `DeepSeek Harness Setup <version>.exe` | older self-made shell (product name `DeepSeek Harness`) |
 
 1. Run the installer — default installs to your user directory, custom path allowed
 2. On first launch a setup window appears: enter your DeepSeek API Key (`sk-...`, get one at [platform.deepseek.com](https://platform.deepseek.com))
 3. Save and enter the main window; the key is reused on later launches
 
-> Tips: **X = close to tray** (0.9 uses the official desktop behaviour, the server keeps running); the tray menu opens the window / quits.
+> Tips: **X = close to tray** (the server keeps running); the tray menu opens the window / quits — **quitting takes down the whole process tree** (since 0.9.2).
+> If the app is running during installation, the installer first asks it to quit and force-kills as a fallback (retryable).
 > No Node.js / pnpm / DSH or any other environment needed.
-> 0.9.1-alpha2 is an alpha prerelease; pick 0.7.0 for the more conservative older kernel (self-made shell).
+> 0.9.2-rc1 is a release candidate; pick 0.7.0 for the more conservative older kernel (self-made shell).
 
 ## Project layout
 

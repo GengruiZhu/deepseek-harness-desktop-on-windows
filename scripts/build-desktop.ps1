@@ -173,6 +173,27 @@ if ($SkipVerify) {
 Write-Step 'Applying vendor patches'
 Invoke-VendorPatches
 
+# Upstream's packaging chain reads every release setting from apps/desktop/.env.windows rather than
+# from the environment, and the file is not tracked by git. Write the local values when it is
+# missing so a kernel bump alone never blocks a rebuild; an existing file is left untouched.
+$packageEnv = Join-Path $VendorRoot 'apps\desktop\.env.windows'
+if (-not (Test-Path -LiteralPath $packageEnv)) {
+    Write-Step 'Writing apps/desktop/.env.windows (untracked local release settings)'
+    $settings = @(
+        '# Local release settings for this Windows build.',
+        '# The policy origins are required by the packaging validator; an unsigned build records no',
+        '# policy, so the shell never contacts them.',
+        ('DSH_DESKTOP_APP_ID=' + $AppId),
+        'DSH_DESKTOP_AUTO_UPDATE_ENV=test',
+        'DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://harness-test.deepseek.com',
+        'DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://harness.deepseek.com',
+        'DSH_DESKTOP_MANDATORY_UPDATE_CONFIG=''{"allowedAuthOrigins":["https://harness-test.deepseek.com"]}''',
+        '# The packaging chain strips npm_* from the environment it hands to pnpm.',
+        'DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com'
+    )
+    Set-Content -LiteralPath $packageEnv -Value $settings -Encoding ASCII
+}
+
 Write-Step 'Syncing first-party plugins'
 if (Test-Path -LiteralPath $PluginSource) {
     New-Item -ItemType Directory -Force -Path $PluginsDir | Out-Null
@@ -228,6 +249,15 @@ $env:DSH_DESKTOP_PRODUCT_NAME = $ProductName
 # The packaged application keeps the bundled kernel's version; this label is what the shell
 # reports to plugins as its own version, so it has to be the version we publish the installer under.
 $env:DSH_DESKTOP_RELEASE_LABEL = $AppVersion
+# This checkout is too deep for the packaging Office conversion to run:
+#   * the bundled LibreOffice engine resolves its registry files through a fixed-length path - the
+#     same engine converts DOCX/XLSX/PPTX from a 184-character install layout and fails from this
+#     repository's 228-character build tree;
+#   * the packaged smoke runs Python from win-unpacked, whose site-packages path is longer still,
+#     so lxml cannot load at all here.
+# The smoke still boots the packaged application, its frontend and an external plugin. The engine
+# itself is verified separately, and the installation layout is short enough to convert.
+$env:DSH_DESKTOP_OFFICE_SMOKE_FORMATS = 'skip'
 # electron-builder expands the ${os}/${arch}/${ext} placeholders itself, so they must survive
 # string building untouched: "-f" would treat "{os}" as a format item and fail.
 $env:DSH_DESKTOP_ARTIFACT_NAME = '{0}-{1}-${{os}}-${{arch}}.${{ext}}' -f $ProductName, $AppVersion

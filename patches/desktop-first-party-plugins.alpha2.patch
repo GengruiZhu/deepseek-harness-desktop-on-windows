@@ -145,23 +145,24 @@ index 00000000..7d4cc8ef
 +  return changed
 +}
 diff --git a/apps/desktop/src/project-manager.ts b/apps/desktop/src/project-manager.ts
-index af7804e1..af483852 100644
+index 270d87d6..f10b1d49 100644
 --- a/apps/desktop/src/project-manager.ts
 +++ b/apps/desktop/src/project-manager.ts
-@@ -27,6 +27,7 @@ import {
- } from '@deepseek-ai/dsh-app-boot'
- import { migrateDesktopProfileLinks } from './profile-packages.ts'
- import { cleanProfileCorePackages } from './profile-core-cleanup.ts'
+@@ -22,6 +22,7 @@ import {
+ import type { DesktopPaths } from './paths.ts'
+ import type { DesktopRelease } from './release.ts'
+ import { readDesktopRuntime } from './runtime-tree.ts'
 +import { installBundledPlugins } from './bundled-plugins.ts'
- 
- const PROJECT_NAME = '@deepseek-ai/dsh-desktop-runtime'
- const DSH_PACKAGE = '@deepseek-ai/dsh'
-@@ -90,6 +91,9 @@ export class DesktopProjectManager {
+ import {
+   initProfile, PROFILE_TEMPLATES, removeLinkProjections, sanitizeProfile, type ProfileTemplate,
+ } from '@deepseek-ai/dsh-app-boot'
+@@ -87,6 +88,10 @@ export class DesktopProjectManager {
        migrateProfileSettings(this.paths.profile)
-       migrateDesktopProfileLinks(this.paths.profile)
        createPluginProfile(this.paths.profile)
+       removeLinkProjections(this.paths.profile)
 +      // First-party plugins ship inside the application (resources/plugins); materialize them into
-+      // the profile as real directories and refresh any copy whose content changed.
++      // the profile as real directories and refresh any copy whose content changed. This runs after
++      // removeLinkProjections so nothing later in this transaction prunes what it wrote.
 +      installBundledPlugins(this.paths.profile, join(process.resourcesPath, 'plugins'))
      })
    }

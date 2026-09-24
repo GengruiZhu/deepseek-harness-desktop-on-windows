@@ -1,7 +1,7 @@
-diff --git a/apps/desktop/scripts/prepare-primary-runtime.ts b/apps/desktop/scripts/prepare-primary-runtime.ts
-index 9163db12..05ef5d00 100644
---- a/apps/desktop/scripts/prepare-primary-runtime.ts
-+++ b/apps/desktop/scripts/prepare-primary-runtime.ts
+diff --git a/scripts/primary-runtime/prepare.ts b/scripts/primary-runtime/prepare.ts
+index a156a756..e260d7de 100644
+--- a/scripts/primary-runtime/prepare.ts
++++ b/scripts/primary-runtime/prepare.ts
 @@ -1,6 +1,6 @@
  /** Prepare pinned, relocatable script interpreters without installing into the build host. */
  
@@ -10,28 +10,28 @@ index 9163db12..05ef5d00 100644
  import { createHash } from 'node:crypto'
  import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
  import { cp } from 'node:fs/promises'
-@@ -76,6 +76,31 @@ export async function unpackPrimaryRuntimeWheel(archive: string, destination: st
-   })
+@@ -59,6 +59,31 @@ export function primaryRuntimePayloadDigest(
+   })).digest('hex')
  }
  
 +/**
-+ * Copy the skill package's complete asset tree to ordinary filesystem resources.
-+ * @param source - The package's assets directory.
-+ * @param destination - Desktop runtime resource directory outside ASAR.
-+ * @returns Resolves after replacing the external assets with the complete package tree.
++ * Unpack a locked library wheel, retaining auxiliary scripts in its distribution data directory.
++ * @param archive - Hash-verified wheel archive.
++ * @param destination - Absolute site-packages directory.
++ * @returns Resolves after extraction without command wrappers; rejects other wheel installation schemes.
 + */
 +/**
 + * Extract a Windows ZIP with the bsdtar that ships inside Windows.
 + *
-+ * extract-zip 2.0.1 stalls partway through the Node.js Windows distribution archive on this
-+ * build host (it stops after a handful of entries and never settles, so preparation hangs
-+ * instead of failing), while the bundled `tar.exe` unpacks the identical archive in under a
-+ * second. Only the large interpreter archive takes this path; small wheels keep extract-zip so
-+ * their entry-scheme validation still runs.
++ * extract-zip 2.0.1 stalls partway through the Node.js Windows distribution archive on this build
++ * host (it stops after a handful of entries and never settles, so preparation hangs instead of
++ * failing), while the bundled `tar.exe` unpacks the identical archive in under a second. Only the
++ * large interpreter archive takes this path; small wheels keep extract-zip so their entry-scheme
++ * validation still runs.
 + * @param archive - Absolute path of the ZIP to extract.
 + * @param destination - Absolute directory that receives the archive contents.
 + */
-+async function extractWindowsArchive(archive: string, destination: string): Promise<void> {
++function extractWindowsArchive(archive: string, destination: string): void {
 +  const result = spawnSync('tar', ['-xf', archive, '-C', destination], { encoding: 'utf8' })
 +  if (result.error !== undefined || result.status !== 0) {
 +    const detail = result.error?.message ?? result.stderr.trim()
@@ -40,14 +40,16 @@ index 9163db12..05ef5d00 100644
 +}
 +
  /**
-  * Copy the skill package's complete asset tree to ordinary filesystem resources.
-  * @param source - The package's assets directory.
-@@ -107,7 +132,7 @@ export async function preparePrimaryRuntime(options: { deferSmoke?: boolean } =
-     const nodeArchive = await downloadPrimaryRuntimeAsset(`https://nodejs.org/dist/v${lock.nodeVersion}/${nodeFilename}`, artifact.nodeSha256, paths.downloads)
-     const unpackedNode = join(staging, 'node')
-     mkdirSync(unpackedNode)
--    if (target === 'win-x64') await extractZip(nodeArchive, { dir: unpackedNode })
-+    if (target === 'win-x64') await extractWindowsArchive(nodeArchive, unpackedNode)
-     else await extractTar({ file: nodeArchive, cwd: unpackedNode })
-     const nodeSource = join(unpackedNode, nodeFilename.replace(/\.(?:zip|tar\.gz)$/u, ''))
-     mkdirSync(join(dependencies, 'node', 'bin'), { recursive: true })
+  * Unpack a locked library wheel, retaining auxiliary scripts in its distribution data directory.
+  * @param archive - Hash-verified wheel archive.
+@@ -127,8 +152,8 @@ export async function preparePrimaryRuntime(options: PreparePrimaryRuntimeOption
+       const nodeArchive = await downloadPrimaryRuntimeAsset(`https://nodejs.org/dist/v${lock.nodeVersion}/${nodeFilename}`, artifact.nodeSha256, paths.downloads)
+       const unpackedNode = join(staging, 'node')
+       mkdirSync(unpackedNode)
+-      if (target === 'win-x64') await extractZip(nodeArchive, { dir: unpackedNode })
+-      else await extractTar({ file: nodeArchive, cwd: unpackedNode })
++    if (target === 'win-x64') extractWindowsArchive(nodeArchive, unpackedNode)
++    else await extractTar({ file: nodeArchive, cwd: unpackedNode })
+       const nodeSource = join(unpackedNode, nodeFilename.replace(/\.(?:zip|tar\.gz)$/u, ''))
+       mkdirSync(join(dependencies, 'node', 'bin'), { recursive: true })
+       mkdirSync(join(dependencies, 'node', 'node_modules'))
