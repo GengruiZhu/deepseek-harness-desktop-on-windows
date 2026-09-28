@@ -25,6 +25,30 @@ window.__ModuleLoader__.load({
 		};
 
 		// ==================== 峰谷徽章 ====================
+		// 每个设置分区各自隔离：我们某一块渲染失败（服务改名、接口变更、数据异常）只让那一块
+		// 显示错误，不再把整张设置页 —— 包括内核自己的「agent 预设」页 —— 一起带崩。
+		class SectionBoundary extends react.Component {
+			constructor(props) { super(props); this.state = { error: null }; }
+			static getDerivedStateFromError(error) { return { error }; }
+			componentDidCatch(error) {
+				try { console.warn("[ds_zhuzhu_use] section failed:", error); } catch (_) { /* 日志失败无所谓 */ }
+			}
+			render() {
+				if (this.state.error) {
+					const text = String((this.state.error && this.state.error.message) || this.state.error);
+					return react.createElement("div", {
+						style: { padding: "10px 14px", fontSize: 12, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary, #888)" }
+					}, "ds_zhuzhu_use 的这一块渲染失败，已单独隔离（不影响其它设置页）：" + text);
+				}
+				return this.props.children;
+			}
+		}
+		function guarded(component) {
+			return function GuardedSection(props) {
+				return react.createElement(SectionBoundary, null, react.createElement(component, props));
+			};
+		}
+
 		const COLORS = {
 			peak: { dot: "#f59e0b", text: "#fbbf24", border: "rgba(245,158,11,.30)", bg: "rgba(245,158,11,.08)" },
 			valley: { dot: "#10b981", text: "#34d399", border: "rgba(16,185,129,.30)", bg: "rgba(16,185,129,.08)" }
@@ -678,6 +702,19 @@ const cardStyle = {
 		// 官方 sidebar.panellist 是「全局面板登记表」：列表项的 id 就是 main 插槽的 key。
 		// conversation 是内核保留的 key（原本的 agent 工作区），chat 是我们新加的纯聊天面板。
 		const CHAT_URL = "https://chat.deepseek.com/";
+		// 站点看到 UA 里的 "Electron/xx"（以及我们的产品名）会直接回一页 Rate Limit / 使用环境异常，
+		// 所以租约 guest 在导航到站点之前先把 UA 换成同一套 Chromium 的浏览器 UA。
+		function chatUserAgent() {
+			try {
+				const raw = navigator.userAgent || "";
+				const chrome = (raw.match(/Chrome\/([\d.]+)/) || [])[1];
+				const platform = (raw.match(/\(([^)]*)\)/) || [])[1];
+				if (!chrome || !platform) return "";
+				return "Mozilla/5.0 (" + platform + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + chrome + " Safari/537.36";
+			} catch (_) {
+				return "";
+			}
+		}
 
 		function panelGlyph(kind, size, active) {
 			const s = size || 16;
@@ -783,14 +820,176 @@ const cardStyle = {
 
 		// 常驻的 Chat 本体。active = 面板此刻被选中；不选中就整段轮询停掉，
 		// 但 guest 不动、页面不重载 —— 再点回来是即时可见。
+		// 官方 0.1.7 起，窗口里的 <webview> 只放行「官方侧栏浏览器」的租约
+		// （apps/desktop/src/browser-guests.ts 的 will-attach-webview）：插件自己建的
+		// webview 会被主进程直接拒掉，元素留在那儿就是纯白。能用的正路是把同一个网址
+		// 交给官方侧栏浏览器（BROWSER_KIND = "browser"，参数 { url }）。
+		/** 官方外壳暴露的租约桥（protocolVersion 1）；旧外壳或网页版没有，就退回自建 webview。 */
+		function desktopBrowserBridge() {
+			try {
+				const desktop = window.dshDesktop;
+				if (!desktop || desktop.protocolVersion !== 1) return undefined;
+				const browser = desktop.browser;
+				return browser && typeof browser.acquire === "function" ? browser : undefined;
+			} catch (_) {
+				return undefined;
+			}
+		}
+
+		function openChatInOfficialBrowser() {
+			try {
+				const ctx0 = pluginCtx;
+				if (!ctx0 || typeof ctx0.get !== "function") return false;
+				const sr = ctx0.get("sidebarRight");
+				if (!sr || typeof sr.openTab !== "function") return false;
+				sr.openTab("browser", { params: { url: CHAT_URL } });
+				return true;
+			} catch (_) {
+				return false;
+			}
+		}
+
+		function ChatFallback(props) {
+			const [msg, setMsg] = useState("");
+			const blocked = !props || props.reason !== "unsupported";
+			const head = blocked ? "这个外壳不允许插件自挂内嵌网页" : "当前外壳没有开启内嵌网页（webviewTag）";
+			const why = blocked
+				? "官方 0.1.7 起，窗口里的 webview 只放行带租约的 guest。插件已经按官方方式申请过租约，这次仍然没挂上，所以先把两个能用的入口给你。"
+				: "";
+			return react.createElement("div", { style: { flex: "1 1 auto", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
+				react.createElement("div", { style: { maxWidth: 440, display: "flex", flexDirection: "column", gap: 10 } },
+					react.createElement("div", { style: { fontSize: 13, color: "var(--dsw-alias-label-primary, #333)" } }, head),
+					why ? react.createElement("div", { style: { fontSize: 12, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary, #888)" } }, why) : null,
+					react.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } },
+						react.createElement("button", {
+							style: S.btnPrimary,
+							onClick: () => setMsg(openChatInOfficialBrowser()
+								? "已交给官方侧栏浏览器打开（看右侧栏的 Browser 页签）。"
+								: "这个外壳没有侧栏浏览器接口，用右边那个链接在系统浏览器里打开。")
+						}, "用官方侧栏浏览器打开"),
+						react.createElement("a", { href: CHAT_URL, target: "_blank", rel: "noreferrer", style: { fontSize: 12, color: "var(--dsw-alias-brand-primary, #0a3)" } }, "在系统浏览器里打开 chat.deepseek.com")
+					),
+					react.createElement("div", { style: { fontSize: 11, lineHeight: 1.6, color: "var(--dsw-alias-label-secondary, #888)" } },
+						"侧栏浏览器里打开后，这块面板就不需要了。另外 /webchat 的网页会话归档依赖旧外壳的读取桥（window.dshChat），官方外壳没有这个接口。"),
+					msg ? react.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #888)" } }, msg) : null
+				)
+			);
+		}
+
 		function ChatSurface(props) {
 			const active = !!(props && props.active);
 			const [sync, setSync] = useState({ at: 0, state: "idle", msg: "" });
 			const supported = webviewAvailable();
+			// guest 到底有没有挂上：挂不上（被外壳拒掉）就换成能用的入口，不再留一块纯白。
+			const [embed, setEmbed] = useState(supported ? "probing" : "unsupported");
+			const hostRef = useRef(null);
+			const guestRef = useRef(null);
+			const leaseRef = useRef(null);
+			const openRequestRef = useRef(null);
+			// 「只做一次」：换 UA 会让 guest 重新加载一次引导页，不加锁就会
+			// dom-ready → setUserAgent → 重新加载 → dom-ready … 一直闪烁。
+			const onceRef = useRef({ ua: false, navigated: false });
+			const readyRef = useRef(false);
+			// host 半边每次启动都会检查/补回「分区持久化」补丁，这里只读它的状态用于提示。
+			const [patch, setPatch] = useState(null);
+			useEffect(() => {
+				let alive = true;
+				fetch("/api/ds-zhuzhu-use/asar-patch", { cache: "no-store" })
+					.then((r) => r.json())
+					.then((d) => { if (alive && d && d.ok) setPatch(d.data); })
+					.catch(() => { /* 拿不到就不提示 */ });
+				return () => { alive = false; };
+			}, []);
+
+			// 官方壳子只放行「带租约」的 webview：向官方桥要一份 reservation（lease + 分区），
+			// 用 about:blank#<lease> 起 guest，挂上之后再由我们 loadURL 到 chat.deepseek.com。
+			// 这正是官方侧栏浏览器自己的做法 —— 区别只是它挂在右侧栏，我们挂在左侧这个面板里。
+			useEffect(() => {
+				const host = hostRef.current;
+				if (!supported || !host) return undefined;
+				let alive = true;
+				const bridge = desktopBrowserBridge();
+				const releaseLease = () => {
+					const lease = leaseRef.current;
+					leaseRef.current = null;
+					if (lease && bridge) { try { void bridge.release(lease).catch(() => {}); } catch (_) { /* 已释放 */ } }
+				};
+				const mount = async () => {
+					const el = document.createElement("webview");
+					fitWebview(el);
+					try {
+						if (bridge) {
+							const reservation = await bridge.acquire("dszhuzhu:chat");
+							if (!alive) { try { void bridge.release(reservation.lease).catch(() => {}); } catch (_) { /* 已释放 */ } return; }
+							leaseRef.current = reservation.lease;
+							// 官方对租约 guest 的弹窗是「拒绝 + 转告」：登录之类的 window.open 得由我们接住，
+							// 直接在这个 guest 里导航过去，否则点了会没反应。
+							if (typeof bridge.onOpenRequested === "function") {
+								openRequestRef.current = bridge.onOpenRequested(reservation.lease, (url) => {
+									try { void el.loadURL(url).catch(() => {}); } catch (_) { /* 交给超时兜底 */ }
+								});
+							}
+							el.setAttribute("name", reservation.lease);
+							el.setAttribute("partition", reservation.partition);
+							el.setAttribute("allowpopups", "");
+							// 先把浏览器 UA 挂在属性上，guest 创建时就带上（下面的 setUserAgent 只是兜底）。
+							const ua = chatUserAgent();
+							if (ua) el.setAttribute("useragent", ua);
+							el.setAttribute("src", "about:blank#" + reservation.lease);
+						} else {
+							// 旧外壳（我们自己那套）：没有租约概念，直接用持久分区挂上去。
+							el.setAttribute("partition", "persist:dsh-fenggu-chat");
+							el.setAttribute("allowpopups", "");
+							el.setAttribute("src", CHAT_URL);
+						}
+						el.addEventListener("dom-ready", () => {
+							if (!alive) return;
+							// 租约 guest 的初始文档是那张 about:blank 引导页，真正的站点在这里导航过去。
+							if (!bridge) return;
+							const once = onceRef.current;
+							const go = () => {
+								if (!alive || once.navigated) return;
+								once.navigated = true;
+								try { void el.loadURL(CHAT_URL).catch(() => {}); } catch (_) { /* 导航失败由超时兜底 */ }
+							};
+							if (once.ua) { go(); return; }
+							once.ua = true;
+							const ua = chatUserAgent();
+							if (ua) { try { if (typeof el.setUserAgent === "function") el.setUserAgent(ua); } catch (_) { /* 换 UA 失败就照常走 */ } }
+							// 换 UA 会让这张引导页重新加载一次，等它稳下来再导航，否则导航会被取消。
+							setTimeout(go, 400);
+						});
+						el.addEventListener("did-finish-load", () => {
+							const url = (() => { try { return el.getURL ? el.getURL() : ""; } catch (_) { return ""; } })();
+							if (url && url.indexOf("about:blank") === 0) return;
+							readyRef.current = true;
+							if (alive) setEmbed((prev) => (prev === "ready" ? prev : "ready"));
+						});
+						guestRef.current = el;
+						host.appendChild(el);
+					} catch (_) {
+						if (alive) setEmbed("blocked");
+					}
+				};
+				void mount();
+				return () => {
+					alive = false;
+					if (openRequestRef.current) { try { openRequestRef.current(); } catch (_) { /* 已退订 */ } openRequestRef.current = null; }
+					releaseLease();
+					const el = guestRef.current;
+					guestRef.current = null;
+					if (el && typeof el.remove === "function") { try { el.remove(); } catch (_) { /* 已移除 */ } }
+				};
+			}, [supported]);
+			useEffect(() => {
+				if (embed !== "probing") return undefined;
+				const timer = setTimeout(() => { if (!readyRef.current) setEmbed("blocked"); }, 6000);
+				return () => clearTimeout(timer);
+			}, [embed]);
 
 			// 面板开着的时候定期把页面可见文字同步到本地存档（宿主侧按天写 JSONL + latest.json）。
 			useEffect(() => {
-				if (!supported || !active) return undefined;
+				if (!supported || embed !== "ready" || !active) return undefined;
 				let alive = true;
 				const tick = () => {
 					const api = window.dshChat;
@@ -831,29 +1030,36 @@ const cardStyle = {
 				tick();
 				const timer = setInterval(tick, CHAT_SYNC_MS);
 				return () => { alive = false; clearInterval(timer); };
-			}, [supported, active]);
+			}, [supported, embed, active]);
 
-			if (!supported) {
-				return react.createElement("div", { style: { flex: "1 1 auto", display: "flex", alignItems: "center", justifyContent: "center" } },
-					react.createElement("div", { style: { textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center" } },
-						react.createElement("div", { style: { fontSize: 13, color: "var(--dsw-alias-label-secondary, #888)" } }, "当前外壳没有开启内嵌网页（webviewTag），Chat 面板无法显示。"),
-						react.createElement("a", { href: CHAT_URL, target: "_blank", rel: "noreferrer", style: { fontSize: 13, color: "var(--dsw-alias-brand-primary, #0a3)" } }, "在浏览器里打开 chat.deepseek.com")
-					)
-				);
+			if (embed === "unsupported" || embed === "blocked") {
+				return react.createElement(ChatFallback, { reason: embed });
 			}
 
 			const pill = sync.state === "ok"
 				? "已存 " + (sync.rows ? sync.rows + " 条 · " : "") + new Date(sync.at).toLocaleTimeString("zh-CN", { hour12: false })
 				: (sync.state === "idle" ? "正在同步…" : "未同步 · " + sync.msg);
 
+			// host 半边会保证「内嵌网页的分区是持久化的」（官方更新后自动补回），这里只把
+			// 「刚补上、要重启才生效」或「补不上」这两件事告诉用户，免得又以为是登录坏了。
+			const patchNote = !patch ? null
+				: (patch.state === "patched"
+					? "登录持久化补丁已补回 · 重启一次生效"
+					: (patch.state === "failed" ? "登录持久化补丁打不上：" + (patch.detail || "") : null));
+
 			return react.createElement("div", { style: { position: "relative", flex: "1 1 auto", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--dsw-alias-bg-base, #fff)" } },
-				react.createElement("webview", {
-					src: CHAT_URL,
-					allowpopups: "true",
-					partition: "persist:dsh-fenggu-chat",
-					ref: fitWebview,
-					style: { flex: "1 1 auto", minHeight: 0, width: "100%" },
-				}),
+				// guest 由上面的 effect 亲手创建（租约是异步拿到的，走 React 的 <webview> 属性没法先拿 lease）。
+				react.createElement("div", { ref: hostRef, style: { flex: "1 1 auto", minWidth: 0, minHeight: 0, display: "flex" } }),
+				patchNote ? react.createElement("div", {
+					style: {
+						position: "absolute", left: 10, bottom: 10, maxWidth: 360,
+						fontSize: 10, lineHeight: 1.3, padding: "3px 8px", borderRadius: 999,
+						color: "var(--dsw-alias-label-secondary, #888)",
+						background: "var(--dsw-alias-bg-layer-1, #fff)",
+						border: "1px solid var(--dsw-alias-border-l2, #e5e5e5)",
+						opacity: 0.86, pointerEvents: "none",
+					}
+				}, patchNote) : null,
 				react.createElement("div", {
       title: "网页内容会自动存到本地的 web-chat 目录，agent 用 /webchat 读取",
 					style: {
@@ -3267,6 +3473,29 @@ function PetsSection() {
 
 
 		// ==================== 注册 ====================
+		// 任务栏 / Alt-Tab 上显示的是 document.title，官方壳子没有拦 page-title-updated，
+		// 所以这几行能把「… — DeepSeek Harness」缩成「… — DS Harness」。
+		// 注意：开始菜单的名称与图标属于安装包（快捷方式 + exe 内嵌图标），插件改不了 ——
+		// 那部分由仓库里的 werk\brand-official-app.ps1 在机器上直接改。
+		const WINDOW_TITLE_FROM = "DeepSeek Harness";
+		const WINDOW_TITLE_TO = "DS Harness";
+		function shortenWindowTitle() {
+			try {
+				const fix = () => {
+					const current = document.title;
+					if (typeof current === "string" && current.indexOf(WINDOW_TITLE_FROM) >= 0) {
+						document.title = current.split(WINDOW_TITLE_FROM).join(WINDOW_TITLE_TO);
+					}
+				};
+				fix();
+				const title = document.querySelector("head > title");
+				const target = title || document.head;
+				if (target && typeof MutationObserver === "function") {
+					new MutationObserver(fix).observe(target, { childList: true, subtree: true, characterData: true });
+				}
+			} catch (_) { /* 改不动标题不影响插件其它功能 */ }
+		}
+
 		function apply(ctx) {
 			// 设置页要拿 ctx.remote.pluginManager 和 ctx.layout，把上下文留给它们。
 			pluginCtx = ctx;
@@ -3288,22 +3517,17 @@ function PetsSection() {
 			ctx.slots.inject("settings.section", () =>
 				ctx.slots.register({
 					name: "settings.section",
-					// 内核自带的「agent 预设」那块是 order 20；紧挨着它放（20.5），
-					// 因为这里管的正是预设里那两行依赖的可选驱动。
+					// 排在最后（27），离内核自己的「agent 预设」页（order 20）远一点：
+					// 我们这一块渲染出任何问题都不该挨着内核那页，何况它已经单独做了错误隔离。
 					id: "subagent-drivers",
-					order: 20.5,
+					order: 27,
 					label: () => "子代理"
-				}, SubagentSection)
+				}, guarded(SubagentSection))
 			);
 
-			ctx.slots.inject("settings.section", () =>
-				ctx.slots.register({
-					name: "settings.section",
-					id: "software-info",
-					order: 21,
-					label: () => "软件信息"
-				}, AboutSection)
-			);
+			// 「软件信息」已下线：转向官方桌面端之后版本/反馈/更新都由官方自己管，
+			// 这一页留着只会显示旧外壳的版本号与我们的 GitHub release 列表，反而误导。
+			// 组件本身保留在文件里（AboutSection），需要时可以一行挂回来。
 
 			ctx.slots.inject("settings.section", () =>
 				ctx.slots.register({
@@ -3314,7 +3538,7 @@ function PetsSection() {
 					id: "desktop-plugins",
 					order: 26,
 					label: () => "桌面插件"
-				}, DesktopPluginsSection)
+				}, guarded(DesktopPluginsSection))
 			);
 
 			ctx.slots.inject("settings.section", () =>
@@ -3323,7 +3547,7 @@ function PetsSection() {
 					id: "workspace-manager",
 					order: 23,
 					label: () => "工作目录"
-				}, WorkspaceSection)
+				}, guarded(WorkspaceSection))
 			);
 		}
 
@@ -3336,7 +3560,7 @@ function PetsSection() {
 			const dp = (typeof ctx.get === "function") ? ctx.get("documentPreviews") : undefined;
 			const dpRegister = (def) => (dp && typeof dp.register === "function") ? dp.register(def) : () => {};
 			ctx.slots.inject("settings.section", () =>
-				ctx.slots.register({ name: "settings.section", id: "session-versions", order: 24, label: () => "会话版本" }, SessionsSection)
+				ctx.slots.register({ name: "settings.section", id: "session-versions", order: 24, label: () => "会话版本" }, guarded(SessionsSection))
 			);
 						dpRegister({ id: PV_PDF, extensions: ["pdf"], priority: "extension", title: () => "PDF", loading: "bytes-complete" });
 dpRegister({ id: PV_DOCX, extensions: ["docx", "doc", "rtf"], priority: "extension", title: () => "Word", loading: "bytes-complete" });
@@ -3349,8 +3573,8 @@ dpRegister({ id: PV_SLIDES, extensions: ["pptx", "ppt"], priority: "extension", 
 				ctx.slots.register({ name: "sidebar.right.tab.document", key: PV_SHEET }, NativeSheetPreview);
 				ctx.slots.register({ name: "sidebar.right.tab.document", key: PV_SLIDES }, NativeSlidesPreview);
 			});
-						ctx.slots.inject("settings.section", () =>
-				ctx.slots.register({ name: "settings.section", id: "pets", order: 25, label: () => "宠物" }, PetsSection)
+			ctx.slots.inject("settings.section", () =>
+				ctx.slots.register({ name: "settings.section", id: "pets", order: 25, label: () => "宠物" }, guarded(PetsSection))
 			);
 			ctx.slots.inject("conversation.input.dock", () =>
 				ctx.slots.register({ name: "conversation.input.dock", id: "ds_zhuzhu_use-pet-state", order: 60 }, PetDock)
@@ -3387,12 +3611,13 @@ dpRegister({ id: PV_SLIDES, extensions: ["pptx", "ppt"], priority: "extension", 
 			);
 
 			ctx.slots.inject("settings.general.item", () =>
-				ctx.slots.register({ name: "settings.general.item", id: "ds_zhuzhu_use-usage-scope", order: 50 }, UsageScopeRow)
+				ctx.slots.register({ name: "settings.general.item", id: "ds_zhuzhu_use-usage-scope", order: 50 }, guarded(UsageScopeRow))
 			);
 
-			ctx.slots.inject("sidebar.footer.action", () =>
-				ctx.slots.register({ name: "sidebar.footer.action", id: "ds_zhuzhu_use-update", order: 50 }, UpdateFooterAction)
-			);
+			// 侧栏的「检查更新」入口也下线：它查的是我们仓库的 release（0.9.x 那套）。
+			// 官方桌面端自带更新源，这里再挂一个只会把人带回到旧壳子上。
+			// 组件 UpdateFooterAction 保留在文件里，需要时一行挂回来。
+			shortenWindowTitle();
 			apply(ctx);
 		}
 

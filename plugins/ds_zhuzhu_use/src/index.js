@@ -23,7 +23,7 @@
  * 的实现是：让用户粘贴一次平台会话令牌并存到本地（~/.dsh/ds-zhuzhu-use-token），
  * 之后重启自动读取，无需再次登录。
  */
-import { readFileSync, writeFileSync, appendFileSync, rmSync, mkdirSync, createWriteStream, renameSync, statSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, rmSync, mkdirSync, createWriteStream, renameSync, statSync, existsSync, readdirSync, openSync, readSync, writeSync, closeSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -68,6 +68,144 @@ const updateState = {
 
 function dshHome() {
   return process.env.DSH_HOME || join(process.env.USERPROFILE || homedir(), '.dsh')
+}
+
+// ==================== 官方壳子：内嵌网页的分区持久化补丁 ====================
+// 官方壳子给 webview 的分区名是 `dsh-sidebar-browser-${randomUUID()}` —— 没有 `persist:` 前缀，
+// Chromium 把它当"进程内会话"，于是嵌进来的 chat.deepseek.com 每次重启都要重新登录。
+// 那一行在主进程的 lib/main.js 里，插件运行时（渲染进程）够不到；但 host 半边有完整 Node 权限，
+// 可以在这台机器上把 app.asar 原地改掉，而且**等长替换**：`dsh-sidebar-browser-${randomUUID()}`
+// 与 `'persist:dsh-desktop-browser-profile'` 都是 37 字节 → 文件偏移不变，asar 依旧有效。
+// 每次启动都检查一遍，所以官方更新把 app.asar 换掉之后，下一次启动会自动补回来。
+const ASAR_PARTITION_ORIGINAL = '`dsh-sidebar-browser-${randomUUID()}`'
+const ASAR_PARTITION_REPLACEMENT = "'persist:dsh-desktop-browser-profile'"
+const ASAR_PATCH_RECORD = () => join(dshHome(), 'ds-zhuzhu-use', 'asar-patch.json')
+
+/** @returns app.asar 的绝对路径；host 不是从 asar 里跑起来的时候返回 undefined。 */
+function asarPathFromHostArgv() {
+  for (const arg of process.argv) {
+    if (typeof arg !== 'string') continue
+    const index = arg.toLowerCase().indexOf('app.asar')
+    if (index < 0) continue
+    return arg.slice(0, index + 'app.asar'.length)
+  }
+  return undefined
+}
+
+function readAsarPatchRecord() {
+  try {
+    const value = JSON.parse(readFileSync(ASAR_PATCH_RECORD(), 'utf8'))
+    return value && typeof value === 'object' ? value : undefined
+  } catch (_) {
+    return undefined
+  }
+}
+
+function writeAsarPatchRecord(value) {
+  try {
+    mkdirSync(dirname(ASAR_PATCH_RECORD()), { recursive: true })
+    writeFileSync(ASAR_PATCH_RECORD(), JSON.stringify(value, null, 2) + '\n', 'utf8')
+  } catch (_) { /* 记录写不了也不影响补丁本身 */ }
+}
+
+/**
+ * 在文件里流式找一个 needle（不把 117MB 全读进内存）。
+ * @returns 命中位置与命中的 needle，找不到返回 undefined。
+ */
+function scanFileForNeedles(path, needles) {
+  const longest = Math.max(...needles.map((needle) => Buffer.byteLength(needle)))
+  const chunkSize = 4 * 1024 * 1024
+  const chunk = Buffer.allocUnsafe(chunkSize)
+  const fd = openSync(path, 'r')
+  try {
+    let position = 0
+    let carry = Buffer.alloc(0)
+    for (;;) {
+      const read = readSync(fd, chunk, 0, chunkSize, position)
+      if (read <= 0) return undefined
+      const body = carry.length === 0
+        ? Buffer.from(chunk.subarray(0, read))
+        : Buffer.concat([carry, chunk.subarray(0, read)])
+      const base = position - carry.length
+      for (const needle of needles) {
+        const index = body.indexOf(Buffer.from(needle, 'utf8'))
+        if (index >= 0) return { needle, offset: base + index }
+      }
+      carry = Buffer.from(body.subarray(Math.max(0, body.length - (longest - 1))))
+      position += read
+    }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+let asarPatchStatus = { state: 'idle', detail: '尚未检查', path: '', offset: -1 }
+
+/**
+ * 检查并把持久化补丁落在 app.asar 上；已补过就什么都不做。
+ * @returns {状态, 说明} —— 永不抛错，补丁失败不影响插件其它功能。
+ * （导出只是为了让离线自测能直接调用它，内核只认 apply/name/inject。）
+ */
+export function ensurePersistentBrowserProfile() {
+  const status = { state: 'skipped', detail: '', path: '', offset: -1 }
+  // host 进程是 Electron 的 Node 模式：它的 fs 带 asar 补丁，任何含 `.asar` 的路径都会被
+  // 解析成"档案内的某个文件"，于是 open('…\app.asar') 会报 ENOENT, not found in …app.asar。
+  // process.noAsar 是 Electron 给的开关，置位期间按普通文件系统处理（用完必须还原）。
+  const previousNoAsar = process.noAsar
+  process.noAsar = true
+  try {
+    const asar = asarPathFromHostArgv()
+    status.path = asar || ''
+    if (!asar) {
+      status.detail = '宿主不是从 app.asar 启动的（开发模式或自建壳子），无需补丁'
+      return status
+    }
+    if (!existsSync(asar)) {
+      status.detail = '找不到 app.asar'
+      return status
+    }
+    const before = statSync(asar)
+    const record = readAsarPatchRecord()
+    if (record && record.state === 'patched' && record.size === before.size && record.mtimeMs === before.mtimeMs) {
+      status.state = 'already'
+      status.detail = '补丁在位（按大小/时间命中，未重新扫描）'
+      status.offset = typeof record.offset === 'number' ? record.offset : -1
+      return status
+    }
+    const hit = scanFileForNeedles(asar, [ASAR_PARTITION_ORIGINAL, ASAR_PARTITION_REPLACEMENT])
+    if (hit === undefined) {
+      status.detail = 'app.asar 里没有那一行（官方可能改了实现）'
+      return status
+    }
+    if (hit.needle === ASAR_PARTITION_REPLACEMENT) {
+      const after = statSync(asar)
+      writeAsarPatchRecord({ state: 'patched', size: after.size, mtimeMs: after.mtimeMs, offset: hit.offset })
+      status.state = 'already'
+      status.detail = '补丁在位'
+      status.offset = hit.offset
+      return status
+    }
+    const body = Buffer.from(ASAR_PARTITION_REPLACEMENT, 'utf8')
+    const fd = openSync(asar, 'r+')
+    try {
+      writeSync(fd, body, 0, body.length, hit.offset)
+    } finally {
+      closeSync(fd)
+    }
+    const after = statSync(asar)
+    writeAsarPatchRecord({ state: 'patched', size: after.size, mtimeMs: after.mtimeMs,
+      offset: hit.offset, original: ASAR_PARTITION_ORIGINAL })
+    status.state = 'patched'
+    status.offset = hit.offset
+    status.detail = '已把内嵌网页分区补成持久化，重启应用后生效'
+    return status
+  } catch (error) {
+    status.state = 'failed'
+    status.detail = String((error && error.message) || error)
+    return status
+  } finally {
+    process.noAsar = previousNoAsar
+  }
 }
 
 function appVersion() {
@@ -2507,7 +2645,10 @@ function explainText() {
 export function apply(ctx, config = {}) {
   ctx.effect(() => {
     petEnsureTimer(ctx)
+    // 官方更新会把 app.asar 换回原样 → 这里每次启动都补一遍（已补过就是一次 stat，几乎无成本）。
+    asarPatchStatus = ensurePersistentBrowserProfile()
     const disposers = [
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/asar-patch', () => ({ ok: true, data: asarPatchStatus }))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/period', () => periodPayload())),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/balance', () => fetchBalance(ctx))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/usage', () => {

@@ -10,7 +10,7 @@
 > DeepSeek 官方已发布**带数字签名**的 Windows 桌面应用（本机实测签名有效，签名者 `CN="Hangzhou DeepSeek Artificial Intelligence Co., Ltd."`，内核 `0.1.7-rc.2`）。官方源码：[`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)。
 >
 > - ❌ 本仓库**不再更新软件本体**：安装包停在 `0.9.2-rc1`，历史版本仍在 [Releases](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/releases)
-> - ✅ 此后**只以插件形式更新**：[`plugins/ds_zhuzhu_use`](plugins/ds_zhuzhu_use)（峰谷徽章 / usage 卡片 / 网页版面板 / 宠物 / 文档预览 / 会话版本 …）
+> - ✅ 此后**只以插件形式更新**：源码 [`plugins/ds_zhuzhu_use`](plugins/ds_zhuzhu_use) · **发布分支 [`plugin-assets`](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/tree/plugin-assets)**（官方插件格式说明 + 安装步骤 + **风险提示与声明**）。功能：峰谷徽章 / usage 卡片 / 网页版面板 / 宠物 / 文档预览 / 会话版本 …
 > - 📄 详情见置顶公告 **[#2 官方桌面版已发布](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)**
 
 > 自用开源的 DeepSeek Harness 桌面客户端 —— Electron 薄壳 + 完全自包含运行环境，免装 Node.js / pnpm / DSH，安装即用。

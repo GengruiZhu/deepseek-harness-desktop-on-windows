@@ -10,7 +10,7 @@
 > DeepSeek now ships an **officially signed** Windows desktop app (verified locally: signature valid, signer `CN="Hangzhou DeepSeek Artificial Intelligence Co., Ltd."`, kernel `0.1.7-rc.2`). Official source: [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop).
 >
 > - ❌ **No further application builds here**: the installer line stops at `0.9.2-rc1`; older installers stay in [Releases](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/releases)
-> - ✅ **Plugin-only updates from now on**: [`plugins/ds_zhuzhu_use`](plugins/ds_zhuzhu_use) (badge / usage card / web panel / pets / document previews / session versions …)
+> - ✅ **Plugin-only updates from now on**: source [`plugins/ds_zhuzhu_use`](plugins/ds_zhuzhu_use) · **release branch [`plugin-assets`](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/tree/plugin-assets)** (official plugin format, install steps, and the risk/notice section). Features: badge / usage card / web panel / pets / document previews / session versions …
 > - 📄 Details in the pinned announcement: **[#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)**
 
 > A self-contained Windows desktop client for DeepSeek Harness — a thin Electron shell around the official DSH runtime. No Node.js / pnpm / DSH installation required.
