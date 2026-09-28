@@ -112,7 +112,25 @@ Official `dsh`-format **first-party plugin**, published on the `plugin-assets` b
 
 **Official plugin format.** `package.json` declares `dsh.bundle.patch` (→ `cordis.patch.yml`, one row mounting both the Host and Browser halves) and `dsh.client` (`inject` + `platform: web`). Never declare `react` / `react-dom` — the official desktop profile check rejects it with `resolves react outside its owned packages` and refuses to start.
 
-**Install.** Use the packed tarball in this branch — `ds_zhuzhu_use-0.2.0.tgz`, produced by `npm pack` (8 files, ~103 KB): `npm install ".\ds_zhuzhu_use-0.2.0.tgz"`, or `dsh plugin --profile desktop add` it. Alternatively drop the `ds_zhuzhu_use/` directory into `%USERPROFILE%\.dsh\profiles\desktop\node_modules\`, add `ds_zhuzhu_use` to `dsh.profile.bundles` in the profile `package.json`, then restart. The tarball ships `src/` + `cordis.patch.yml` + `tools/` + `pets/`; **`tools/` is required** — the Host half resolves the session-version tool and the Office scripts from `../tools/`, and `pets/` is the built-in pet scan directory.
+**Install.**
+
+**Option 1 — packed tarball (recommended).** `ds_zhuzhu_use-0.2.0.tgz` at the branch root is the `npm pack` output (8 files, ~103 KB):
+
+```powershell
+npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # installs into the current profile's node_modules
+# with a CLI-enabled install:
+#   dsh plugin --profile desktop add .\ds_zhuzhu_use-0.2.0.tgz
+```
+
+**Option 2 — source directory.**
+
+1. Take the `ds_zhuzhu_use/` directory from this branch
+2. Drop it into the target profile's `node_modules/`:
+   `%USERPROFILE%\.dsh\profiles\desktop\node_modules\ds_zhuzhu_use\`
+3. Add `ds_zhuzhu_use` to `dsh.profile.bundles` in the profile `package.json` (the bundle patch registers the plugin row)
+4. Restart the app
+
+The tarball ships `src/` + `cordis.patch.yml` + `tools/` + `pets/` (see `files`). **`tools/` is required** — the Host half resolves the session-version tool and the Office scripts from `../tools/`, and `pets/` is the built-in pet scan directory.
 
 ### ⚠️ Risks and notice
 
