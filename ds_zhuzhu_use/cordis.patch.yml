@@ -1,0 +1,7 @@
+# ds_zhuzhu_use bundle patch: inserts its plugin row into the web plugin roster.
+# One row mounts BOTH halves: the host side (the /api/ds-zhuzhu-use/* JSON routes and
+# the /usage + /explain-usage commands) and the browser side (the peak/valley
+# pricing-period badge rendered above the composer input).
+- insert:
+    - id: ds_zhuzhu_use
+      name: 'ds_zhuzhu_use'
