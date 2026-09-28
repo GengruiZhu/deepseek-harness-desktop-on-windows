@@ -6,6 +6,8 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
+**当前版本 `0.2.0`** —— 适配官方 0.1.7 桌面壳：侧栏浏览器**租约桥**、`app.asar` **分区持久化补丁**、设置分区独立容错、UA 处理。
+
 ## 插件做什么
 
 - **峰谷计费时段徽章**（输入框上方，含切换倒计时）+ `/usage` 余额卡片 + `/explain-usage` 计价说明
@@ -45,13 +47,26 @@ ds_zhuzhu_use/
 
 ## 安装
 
+**方式一：npm 包（推荐）**
+
+本分支根目录的 `ds_zhuzhu_use-0.2.0.tgz` 就是 `npm pack` 产物（8 个文件，约 103 KB）：
+
+```powershell
+npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # 装进当前 profile 的 node_modules
+# 若你的安装带 CLI：
+#   dsh plugin --profile desktop add .\ds_zhuzhu_use-0.2.0.tgz
+```
+
+**方式二：源码目录**
+
 1. 取本分支的 `ds_zhuzhu_use/` 目录
 2. 放进目标 profile 的 `node_modules/`：
    `%USERPROFILE%\.dsh\profiles\desktop\node_modules\ds_zhuzhu_use\`
 3. 在 profile `package.json` 的 `dsh.profile.bundles` 里加上 `ds_zhuzhu_use`（bundle patch 负责注册插件行）
 4. 重启应用
 
-> 若你的安装带 CLI，也可以用 `dsh plugin --profile desktop add <插件路径>` 完成第 2–3 步。
+> 包内容 = `src/` + `cordis.patch.yml` + `tools/` + `pets/`（见 `files` 字段）。
+> **`tools/` 不能少**：Host 侧的会话版本工具与 Office 转换脚本都从 `../tools/` 解析；`pets/` 是内置宠物扫描目录。
 
 ---
 
@@ -97,7 +112,7 @@ Official `dsh`-format **first-party plugin**, published on the `plugin-assets` b
 
 **Official plugin format.** `package.json` declares `dsh.bundle.patch` (→ `cordis.patch.yml`, one row mounting both the Host and Browser halves) and `dsh.client` (`inject` + `platform: web`). Never declare `react` / `react-dom` — the official desktop profile check rejects it with `resolves react outside its owned packages` and refuses to start.
 
-**Install.** Drop `ds_zhuzhu_use/` into `%USERPROFILE%\.dsh\profiles\desktop\node_modules\`, add `ds_zhuzhu_use` to `dsh.profile.bundles` in the profile `package.json`, then restart.
+**Install.** Use the packed tarball in this branch — `ds_zhuzhu_use-0.2.0.tgz`, produced by `npm pack` (8 files, ~103 KB): `npm install ".\ds_zhuzhu_use-0.2.0.tgz"`, or `dsh plugin --profile desktop add` it. Alternatively drop the `ds_zhuzhu_use/` directory into `%USERPROFILE%\.dsh\profiles\desktop\node_modules\`, add `ds_zhuzhu_use` to `dsh.profile.bundles` in the profile `package.json`, then restart. The tarball ships `src/` + `cordis.patch.yml` + `tools/` + `pets/`; **`tools/` is required** — the Host half resolves the session-version tool and the Office scripts from `../tools/`, and `pets/` is the built-in pet scan directory.
 
 ### ⚠️ Risks and notice
 
