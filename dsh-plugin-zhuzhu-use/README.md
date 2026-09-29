@@ -1,4 +1,4 @@
-# ds_zhuzhu_use —— dsh 插件
+# dsh-plugin-zhuzhu-use —— dsh 插件
 
 官方 `dsh` 插件格式的**自带插件**，发布在 `plugin-assets` 分支（不参与 `main` 的发布流程）。
 **授权跟随 `main`**：与仓库根目录的 [LICENSE](../LICENSE)（MIT）一致。
@@ -6,7 +6,10 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.2.0`** —— 适配官方 0.1.7 桌面壳：侧栏浏览器**租约桥**、`app.asar` **分区持久化补丁**、设置分区独立容错、UA 处理。
+**当前版本 `0.3.0`** —— 相对 0.2.0 只做**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例），功能不变；已发布到 npm 官方源。
+
+> ⚠️ **更名说明**：旧包 [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use)（0.2.0）已弃用，新包为 [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use)。
+> 两者**不能同时安装**（插件行 id 与模块名都变了，同时存在会在 profile 里留下悬空行）。
 
 ## 插件做什么
 
@@ -18,8 +21,8 @@
 ## 官方插件格式
 
 ```text
-ds_zhuzhu_use/
-├── package.json        # name / version / type: module / main / exports / files
+dsh-plugin-zhuzhu-use/
+├── package.json        # name（必须等于目录名）/ version / type / main / exports / files
 ├── cordis.patch.yml    # 即 dsh.bundle.patch：注册插件行（一行同时挂 Host 与 Browser 两侧）
 ├── src/index.js        # Host 侧：/api/ds-zhuzhu-use/* JSON 路由 + 命令 + asar 分区补丁
 ├── src/client.js       # Browser 侧：徽章 / Chat 面板 / 设置分区 / 宠物
@@ -41,48 +44,58 @@ ds_zhuzhu_use/
 }
 ```
 
-> ⚠️ **不要声明 `react` / `react-dom`**（连 peer / optional 都不要）：官方 desktop 的 profile 校验会报
-> `resolves react outside its owned packages` 并**拒绝启动** —— 客户端拿 react 走的是内核自己的模块加载器，
-> 内核自身的 client 包同样不声明它。这条坑写在 `package.json` 的 `$comment` 里。
+> ⚠️ 两条踩过的坑：
+> 1. **不要声明 `react` / `react-dom`**（连 peer / optional 都不要）：官方 desktop 的 profile 校验会报
+>    `resolves react outside its owned packages` 并**拒绝启动** —— 客户端拿 react 走的是内核自己的模块加载器。
+> 2. **`cordis.patch.yml` 里那一行的 `name:` 必须等于 npm 包名**（Node 按它解析模块），目录名也要等于包名；
+>    改名时这几处要一起动，否则启动即报找不到模块。
 
 ## 安装
 
-### 用法一：官方安装器（推荐）
+### 用法一：官方安装器填包名（推荐，最简单）
 
-官方桌面版 → **插件** 页 →「添加插件」。安装器接受 **包名 / Git 仓库地址 / 本地目录 / `.tgz`** 四类来源。
-**本插件目前没有发布到 npm 官方源**（`npm view ds_zhuzhu_use` 为 404），所以填「包名」会报
-*未找到相关插件*；请用下面三种之一：
+官方桌面版 → **插件** 页 →「添加插件」→ 直接填：
+
+```text
+dsh-plugin-zhuzhu-use
+```
+
+已发布到 npm 官方源，安装器会自动从 registry 拉取。（`npm view dsh-plugin-zhuzhu-use version` 可校验线上版本。）
+
+### 用法二：`.tgz` / 本地目录（不想走 npm 源时）
+
+安装器接受 **包名 / Git 仓库地址 / 本地目录 / `.tgz`** 四类来源：
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链**（最省事） | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/ds_zhuzhu_use-0.2.0.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录那个 `ds_zhuzhu_use-0.2.0.tgz` 的**绝对路径** |
-| **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `ds_zhuzhu_use/` 源码目录 |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.0.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.0.tgz` 的**绝对路径** |
+| **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
 > - 安装器会先校验 `dsh.bundle`（本插件有）；装完状态是「已安装但未启用」，点**立即启用**或下次启动生效。
-> - `.tgz` 直链不经过 npm 源，需要本机能直接访问 GitHub（官方文案同样说明这一点）。
 
-### 用法二：本地 tgz + npm install
-
-本分支根目录的 `ds_zhuzhu_use-0.2.0.tgz` 就是 `npm pack` 产物（8 个文件，约 103 KB）：
+### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # 装进当前 profile 的 node_modules
+npm install ".\dsh-plugin-zhuzhu-use-0.3.0.tgz"   # 本地 tgz（本分支根目录）
+npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
-#   dsh plugin --profile desktop add .\ds_zhuzhu_use-0.2.0.tgz
+#   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
 ```
 
-### 用法三：源码目录
-
-1. 取本分支的 `ds_zhuzhu_use/` 目录
-2. 放进目标 profile 的 `node_modules/`：
-   `%USERPROFILE%\.dsh\profiles\desktop\node_modules\ds_zhuzhu_use\`
-3. 在 profile `package.json` 的 `dsh.profile.bundles` 里加上 `ds_zhuzhu_use`（bundle patch 负责注册插件行）
-4. 重启应用
+源码目录方式：把本分支的 `dsh-plugin-zhuzhu-use/` 整个放进
+`%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-plugin-zhuzhu-use\`，
+并在 profile `package.json` 的 `dsh.profile.bundles` 里加上 `dsh-plugin-zhuzhu-use`，然后重启。
 
 > 包内容 = `src/` + `cordis.patch.yml` + `tools/` + `pets/`（见 `files` 字段）。
 > **`tools/` 不能少**：Host 侧的会话版本工具与 Office 转换脚本都从 `../tools/` 解析；`pets/` 是内置宠物扫描目录。
+
+### 从旧名 `ds_zhuzhu_use` 迁移
+
+1. 在官方插件页**卸载** `ds_zhuzhu_use`（或手工移除 profile 里 `node_modules/ds_zhuzhu_use/` 与 `dsh.profile.bundles` 中那一行）
+2. 按上面任一方式安装 `dsh-plugin-zhuzhu-use`
+3. 重启应用。**数据不受影响**：平台令牌、宠物资源、会话版本工具的状态都在 `~/.dsh/` 下，与包名无关
 
 ---
 
@@ -118,7 +131,7 @@ npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # 装进当前 profile 的 node
 ### 3. 回滚 / 卸载
 
 - 删掉 `~/.dsh/ds-zhuzhu-use/asar-patch.json`，并**重装官方应用**，即可恢复原始 `app.asar`；
-- 卸载插件：从 profile 的 `node_modules` 移除 `ds_zhuzhu_use/`，并在 `dsh.profile.bundles` 里去掉 `ds_zhuzhu_use` 那一行，然后重启。
+- 卸载插件：从 profile 的 `node_modules` 移除 `dsh-plugin-zhuzhu-use/`，并在 `dsh.profile.bundles` 里去掉同名那一行，然后重启。
 
 ---
 
@@ -126,39 +139,48 @@ npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # 装进当前 profile 的 node
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Official plugin format.** `package.json` declares `dsh.bundle.patch` (→ `cordis.patch.yml`, one row mounting both the Host and Browser halves) and `dsh.client` (`inject` + `platform: web`). Never declare `react` / `react-dom` — the official desktop profile check rejects it with `resolves react outside its owned packages` and refuses to start.
+**Current version `0.3.0`** — a pure rename from 0.2.0 (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention), functionality unchanged; published to the npm registry.
+
+> ⚠️ **Rename notice**: the old package [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use) (0.2.0) is deprecated; the new one is [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use). Do not install both — the plugin row id and the module name both changed, and keeping both leaves a dangling row in the profile.
+
+**Official plugin format.** `package.json` declares `dsh.bundle.patch` (→ `cordis.patch.yml`, one row mounting both the Host and Browser halves) and `dsh.client` (`inject` + `platform: web`). Two traps worth remembering: never declare `react` / `react-dom` (the official desktop profile check rejects it with `resolves react outside its owned packages` and refuses to start), and the row's `name:` in `cordis.patch.yml` **must equal the npm package name** — as must the directory name — because Node resolves the module by it.
 
 **Install.**
 
-**Way 1 — official plugin manager (recommended).** Official desktop → **Plugins** page → "Add plugin". The installer accepts a package name, a Git repository address, a local directory, or a `.tgz`. **This plugin is not published to the npm registry** (`npm view ds_zhuzhu_use` → 404), so a bare package name reports *No such plugin was found*; use one of these instead:
+**Way 1 — official plugin manager, by package name (recommended).** Official desktop → **Plugins** → "Add plugin" → enter:
+
+```text
+dsh-plugin-zhuzhu-use
+```
+
+It is published to the npm registry, so the installer fetches it automatically (`npm view dsh-plugin-zhuzhu-use version` confirms the published version).
+
+**Way 2 — `.tgz` or a local directory.**
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** (easiest) | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/ds_zhuzhu_use-0.2.0.tgz` |
-| **Local `.tgz` file** | absolute path to `ds_zhuzhu_use-0.2.0.tgz` at the branch root |
-| **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `ds_zhuzhu_use/` source directory |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.0.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.0.tgz` at the branch root |
+| **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
-> - A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*.
-> - The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
-> - A `.tgz` URL is not fetched through the registry, so this machine must reach GitHub directly (as the official hint also states).
+> A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
 
-**Way 2 — local tarball + npm install.** `ds_zhuzhu_use-0.2.0.tgz` at the branch root is the `npm pack` output (8 files, ~103 KB):
+**Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # installs into the current profile's node_modules
+npm install ".\dsh-plugin-zhuzhu-use-0.3.0.tgz"   # local tarball from this branch
+npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
-#   dsh plugin --profile desktop add .\ds_zhuzhu_use-0.2.0.tgz
+#   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
 ```
 
-**Way 3 — source directory.**
-
-1. Take the `ds_zhuzhu_use/` directory from this branch
-2. Drop it into the target profile's `node_modules/`:
-   `%USERPROFILE%\.dsh\profiles\desktop\node_modules\ds_zhuzhu_use\`
-3. Add `ds_zhuzhu_use` to `dsh.profile.bundles` in the profile `package.json` (the bundle patch registers the plugin row)
-4. Restart the app
+Source form: drop the whole `dsh-plugin-zhuzhu-use/` directory into
+`%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-plugin-zhuzhu-use\`, add `dsh-plugin-zhuzhu-use`
+to `dsh.profile.bundles` in the profile `package.json`, then restart.
 
 The tarball ships `src/` + `cordis.patch.yml` + `tools/` + `pets/` (see `files`). **`tools/` is required** — the Host half resolves the session-version tool and the Office scripts from `../tools/`, and `pets/` is the built-in pet scan directory.
+
+**Migrating from the old name `ds_zhuzhu_use`.** Uninstall `ds_zhuzhu_use` in the Plugins page (or remove `node_modules/ds_zhuzhu_use/` and its `dsh.profile.bundles` entry by hand), install `dsh-plugin-zhuzhu-use`, then restart. **No data is lost**: the platform token, pet resources, and session-version state live under `~/.dsh/` and are independent of the package name.
 
 ### ⚠️ Risks and notice
 
