@@ -1,0 +1,31 @@
+{
+  "name": "dsh-plugin-zhuzhu-use",
+  "version": "0.3.3",
+  "description": "梁文峰/梁文谷：峰谷时段徽章 + /usage 余额卡片 + 内嵌网页版面板 + 宠物 + 文档预览 + 会话版本（dsh 插件；原名 ds_zhuzhu_use）",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "tools",
+    "pets"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web"
+    }
+  },
+  "$comment": "不要声明 react / react-dom（连 peer / optional 都不要）：官方 desktop 的 profile 校验会报 'resolves react outside its owned packages' 并拒绝启动 —— runtime 里根本没有 react，客户端拿 react 是走内核自己的模块加载器 require(\"react\")，内核自身的 client 包同样不声明它。",
+  "license": "MIT"
+}
