@@ -3267,12 +3267,221 @@ function PetOptions() {
 			return (mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)) + " MB";
 		}
 
+		// ==================== 插件更新 ====================
+		// 官方插件页对已安装的插件只给启用/停用/删除，没有"更新"；这里列出 profile 里按 npm
+		// 装的插件、比对 registry 的 latest，点一下就地更新（优先官方安装器，老外壳用内核 pnpm）。
+		// 入口原则：官方没给「插件」页头部按钮的插槽，所以尽力在"添加插件"左边插一个按钮，
+		// 注入失败也只是少个入口；面板本身走 shell.overlay，不依赖官方内部结构。
+		const UPDATE_BUTTON_ID = "ds-zhuzhu-plugin-update-button";
+		const UPDATE_EVENT = "ds-zhuzhu-plugin-update:state";
+		/** 进度条"流动"的 keyframes（一次性注入，失败只是没动画）。 */
+		function installUpdateStyles() {
+			try {
+				if (document.getElementById("ds-zhuzhu-style")) return;
+				const style = document.createElement("style");
+				style.id = "ds-zhuzhu-style";
+				style.textContent = "@keyframes dsz-bar { from { background-position: 0 0 } to { background-position: 24px 0 } }";
+				document.head.appendChild(style);
+			} catch (_) { /* 没有动画也能用 */ }
+		}
+		function togglePluginUpdatePanel(open) {
+			try { window.dispatchEvent(new CustomEvent(UPDATE_EVENT, { detail: { open } })); } catch (_) { /* 没人听就算了 */ }
+		}
+		function installPluginUpdateButton() {
+			const insert = () => {
+				try {
+					if (document.getElementById(UPDATE_BUTTON_ID)) return;
+					const add = Array.prototype.slice.call(document.querySelectorAll("button"))
+						.find((b) => /^(\+\s*)?(添加插件|Add plugin)$/i.test((b.textContent || "").trim()));
+					if (!add || !add.parentElement) return;
+					const button = document.createElement("button");
+					button.id = UPDATE_BUTTON_ID;
+					button.type = "button";
+					button.textContent = "更新插件";
+					if (add.className) button.className = add.className;
+					button.style.marginRight = "8px";
+					button.style.opacity = "0.92";
+					button.addEventListener("click", () => togglePluginUpdatePanel(true));
+					add.parentElement.insertBefore(button, add);
+				} catch (_) { /* 官方改版了就只少个入口 */ }
+			};
+			insert();
+			try {
+				new MutationObserver(insert).observe(document.body, { childList: true, subtree: true });
+			} catch (_) { /* 没有 MutationObserver 就在启动时试一次 */ }
+		}
+
+		function PluginUpdateOverlay() {
+			const [open, setOpen] = useState(false);
+			useEffect(() => {
+				const onState = (event) => setOpen(!!(event && event.detail && event.detail.open));
+				window.addEventListener(UPDATE_EVENT, onState);
+				return () => window.removeEventListener(UPDATE_EVENT, onState);
+			}, []);
+			if (!open) return null;
+			return react.createElement("div", {
+				style: { position: "fixed", inset: 0, zIndex: 4200, background: "rgba(15,17,21,.38)",
+					display: "flex", alignItems: "center", justifyContent: "center", padding: "28px" },
+				onClick: (event) => { if (event.target === event.currentTarget) setOpen(false); },
+			}, react.createElement("div", {
+				style: { width: "min(760px, 100%)", maxHeight: "82vh", overflow: "auto", borderRadius: "14px",
+					padding: "16px 20px 20px", background: "var(--dsw-alias-bg-layer-1, #fff)",
+					border: "1px solid var(--dsw-alias-border-l2, #e6e6e6)", boxShadow: "0 24px 64px rgba(0,0,0,.28)" },
+			},
+				react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 } },
+					react.createElement("div", { style: { fontSize: 15, fontWeight: 600 } }, "插件更新"),
+					react.createElement("button", { style: S.btn, onClick: () => setOpen(false) }, "关闭")),
+				react.createElement(PluginUpdateSection, null)));
+		}
+
+		function PluginUpdateSection() {
+			const [data, setData] = useState(null);
+			const [st, setSt] = useState(null);
+			const [msg, setMsg] = useState("");
+			const [busy, setBusy] = useState("");
+
+			const load = useCallback((force) => fetch(force ? "/api/ds-zhuzhu-use/plugins/check" : "/api/ds-zhuzhu-use/plugins", { cache: "no-store" })
+				.then((r) => r.json())
+				.then((d) => { if (d && d.ok) setData(d.data); else setMsg((d && d.error) || "读取插件清单失败"); })
+				.catch((e) => setMsg("读取插件清单失败：" + String(e))), []);
+			useEffect(() => { load(false); }, [load]);
+
+			const running = !!(st && st.phase === "running");
+			useEffect(() => {
+				if (!running) return undefined;
+				const t = setInterval(() => {
+					fetch("/api/ds-zhuzhu-use/plugins/state", { cache: "no-store" })
+						.then((r) => r.json())
+						.then((d) => {
+							if (!d || !d.ok) return;
+							setSt(d.data);
+							if (d.data.phase === "done") {
+								setMsg("已更新 " + d.data.name + " → " + (d.data.to || "最新") + (d.data.restartRequired ? "（重启 dsh 生效）" : ""));
+								load(false);
+							} else if (d.data.phase === "error") setMsg("更新失败：" + (d.data.error || ""));
+						})
+						.catch(() => {});
+				}, 800);
+				return () => clearInterval(t);
+			}, [running, load]);
+
+			function post(path, body) {
+				setBusy((body && body.name) || path);
+				setMsg("");
+				return fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) })
+					.then((r) => r.json())
+					.then((d) => {
+						if (!d || !d.ok) { setMsg((d && d.error) || "操作失败"); return; }
+						if (d.data && d.data.phase) setSt(d.data);
+						if (d.data && d.data.started) setMsg("开始更新 " + d.data.started.length + " 个插件，更新完会刷新列表…");
+					})
+					.catch((e) => setMsg("操作失败：" + String(e)))
+					.finally(() => setBusy(""));
+			}
+
+			const info = data || { items: [] };
+			const items = info.items || [];
+			const updatable = items.filter((i) => i.updateAvailable).length;
+			const card = { border: "1px solid var(--dsw-alias-border-l2, #e6e6e6)", borderRadius: "10px", padding: "12px 14px", marginTop: "8px" };
+			const small = { fontSize: "11px", color: "var(--dsw-alias-label-secondary, #888)", marginTop: "4px" };
+			const tag = (text, tone) => react.createElement("span", {
+				style: {
+					fontSize: "11px", padding: "1px 8px", borderRadius: "999px", marginLeft: "8px",
+					border: "1px solid " + (tone === "warn" ? "rgba(245,158,11,.4)" : "rgba(16,185,129,.4)"),
+					color: tone === "warn" ? "#b45309" : "#059669",
+					background: tone === "warn" ? "rgba(245,158,11,.08)" : "rgba(16,185,129,.08)",
+				},
+			}, text);
+
+			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+				react.createElement("div", { style: S.label }, "插件更新"),
+				react.createElement("div", { style: S.sub }, "官方插件页对已装的插件只给启用/停用/删除；这里比对 npm 上的最新版，点一下原地更新（走官方安装器，老外壳用内核 pnpm）"),
+				react.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", marginTop: "8px", flexWrap: "wrap" } },
+					react.createElement("button", { style: S.btn, disabled: !!busy || running, onClick: () => { setMsg("正在检查…"); load(true).then(() => setMsg("已按 npm 上的最新版刷新")); } }, "检查更新"),
+					updatable ? react.createElement("button", { style: S.btnPrimary, disabled: !!busy || running, onClick: () => post("/api/ds-zhuzhu-use/plugins/update-all", {}) }, "全部更新（" + updatable + "）") : null,
+					info.profile ? react.createElement("span", { style: small }, "profile：" + info.profile) : null,
+					info.officialAvailable === false ? react.createElement("span", { style: small }, "（这个外壳没有官方插件管理器，走内核 pnpm 兜底）") : null
+				),
+				items.length === 0 ? react.createElement("div", { style: small }, "profile 里没有按 npm 装的插件") : null,
+				items.map((it) => react.createElement("div", { key: it.name, style: card },
+					react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" } },
+						react.createElement("div", { style: { minWidth: 0 } },
+							react.createElement("span", { style: S.value }, it.name),
+							it.updateAvailable ? tag("可更新", "warn") : tag("已最新", "on"),
+							it.enabled === false ? react.createElement("span", { style: small }, "（已停用）") : null
+						),
+						react.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexShrink: 0 } },
+							react.createElement("span", { style: S.sub }, (it.installed || "?") + " → " + (it.latest || "?")),
+							it.updateAvailable
+								? react.createElement("button", { style: S.btnPrimary, disabled: !!busy || running, onClick: () => post("/api/ds-zhuzhu-use/plugins/update", { name: it.name }) }, "更新")
+								: null
+						)
+					),
+					running && st && st.name === it.name
+						? react.createElement("div", { style: small }, "更新中… " + (st.detail || "官方安装器在跑"))
+						: null,
+					react.createElement("div", { style: small }, "范围：" + (it.range || "") + (it.officialBundle ? " · 官方 bundle" : ""))
+				)),
+				msg ? react.createElement("div", { style: S.msg }, msg) : null
+			);
+		}
+
 		function SubagentSection() {
 			const [data, setData] = useState(null);
 			const [st, setSt] = useState(null);
 			const [presets, setPresets] = useState(null);
 			const [msg, setMsg] = useState("");
 			const [busy, setBusy] = useState("");
+			const [vers, setVers] = useState({});
+			const [pick, setPick] = useState({});
+			const [verErr, setVerErr] = useState("");
+			// 安装源（空 = pnpm 自己的配置）、日志展开状态、上一次删除的复核报告
+			const [reg, setReg] = useState("");
+			const [showLog, setShowLog] = useState(false);
+			const [report, setReport] = useState(null);
+			// 无主依赖（provider 删掉之后没人再引用的传递依赖）
+			const [orphans, setOrphans] = useState([]);
+			const [orphanReport, setOrphanReport] = useState(null);
+			const [showOrphans, setShowOrphans] = useState(false);
+			const [showDone, setShowDone] = useState(false);
+
+			// 两个 provider 在 npm 上是"按内核版本一起发"的一串版本，这里把可选的列出来。
+			// 拉不到也不挡路：下拉里先给"内核版本"这一项，用户可以照装。
+			const loadVersions = useCallback(() => {
+				setVerErr("");
+				return Promise.all(["codex", "claude"].map((id) => fetch("/api/ds-zhuzhu-use/drivers/versions/" + id, { cache: "no-store" })
+					.then((r) => r.json())
+					.then((d) => [id, d && d.ok ? d.data : null])
+					.catch(() => [id, null])))
+					.then((pairs) => {
+						const next = {};
+						for (const pair of pairs) if (pair[1]) next[pair[0]] = pair[1];
+						setVers(next);
+						const usable = pairs.filter((pair) => pair[1] && pair[1].versions && pair[1].versions.length > 0);
+						if (usable.length === 0) setVerErr("版本列表拉不到（npmjs / npmmirror 超时或不可用）——下拉里先用内核版本，稍后点“重试”。");
+					})
+					.catch(() => setVerErr("版本列表拉不到，下拉里先用内核版本。"));
+			}, []);
+			useEffect(() => { loadVersions(); }, [loadVersions]);
+
+			const chosenVersion = (it) => {
+				if (pick[it.id]) return pick[it.id];
+				const info = vers[it.id];
+				if (info && info.versions && info.versions.length > 0) {
+					// 默认与内核同版本（能对上就选它），否则退到 npm latest。
+					return info.versions.indexOf(info.kernel) !== -1 ? info.kernel : (info.latest || it.kernelVersion || "");
+				}
+				return it.kernelVersion || "";
+			};
+			const versionOptions = (it) => {
+				const info = vers[it.id];
+				const kernel = (info && info.kernel) || it.kernelVersion || "";
+				if (!info || !info.versions || info.versions.length === 0) {
+					return [{ value: kernel, label: kernel ? kernel + "（内核版本）" : "（读取版本列表…）" }];
+				}
+				return info.versions.map((v) => ({ value: v,
+					label: v + (v === kernel ? "（= 内核版本，推荐）" : (v === info.latest ? "（npm latest）" : "")) }));
+			};
 
 			const load = useCallback(() => {
 				return fetch("/api/ds-zhuzhu-use/drivers", { cache: "no-store" })
@@ -3289,25 +3498,33 @@ function PetOptions() {
 					.then((d) => { if (d && d.ok) setPresets(d.data); })
 					.catch(() => {});
 			}, []);
-			useEffect(() => { load(); loadPresets(); }, [load, loadPresets]);
+			const loadOrphans = useCallback(() => {
+				return fetch("/api/ds-zhuzhu-use/drivers/orphans", { cache: "no-store" })
+					.then((r) => r.json())
+					.then((d) => { if (d && d.ok) setOrphans((d.data && d.data.items) || []); })
+					.catch(() => {});
+			}, []);
+			useEffect(() => { load(); loadPresets(); loadOrphans(); }, [load, loadPresets, loadOrphans]);
 
-			// 下载中每 800ms 拉进度；完成后刷新（装好了预设那边就能启用了）
-			const phase = st && st.phase;
+			// 安装期间每 600ms 拉一次状态。进度是真的：pnpm 每开始下一个包就报它的字节数，
+			// 下完就累加 —— received/total 都是真下下来的字节，不是拿阶段凑出来的。
+			const installing = !!(st && st.running);
 			useEffect(() => {
-				if (phase !== "downloading") return undefined;
+				if (!installing) return undefined;
 				const t = setInterval(() => {
 					fetch("/api/ds-zhuzhu-use/drivers/state", { cache: "no-store" })
 						.then((r) => r.json())
 						.then((d) => {
 							if (!d || !d.ok) return;
 							setSt(d.data);
-							if (d.data.phase === "done") { setMsg("装好了：预设里对应的那行已经可以启用"); load(); loadPresets(); }
-							else if (d.data.phase === "error") setMsg("下载失败：" + (d.data.error || ""));
+							// 结果就写在卡片上，底部不重复一遍（长句子在页脚很吵）。
+							if (d.data.phase === "done") { setMsg(""); load(); loadPresets(); loadOrphans(); }
+							else if (d.data.phase === "error") setMsg("安装失败：" + (d.data.error || ""));
 						})
 						.catch(() => {});
-				}, 800);
+				}, 600);
 				return () => clearInterval(t);
-			}, [phase, load, loadPresets]);
+			}, [installing, load, loadPresets, loadOrphans]);
 
 			function post(path, body, ok, note) {
 				setBusy((body && body.id) || path);
@@ -3322,10 +3539,64 @@ function PetOptions() {
 					.finally(() => setBusy(""));
 			}
 
+			// 删除/清理残留：后端无条件执行，回来的是"删了什么 / 还剩什么 / 哪一步失败"的报告。
+			// 这里把报告原样展示，绝不用一句"已删除"糊过去。
+			function removeDriver(it) {
+				setBusy(it.id);
+				setMsg("");
+				setReport(null);
+				return fetch("/api/ds-zhuzhu-use/drivers/remove", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ id: it.id }),
+				})
+					.then((r) => r.json())
+					.then((d) => {
+						if (!d || !d.ok) { setMsg((d && d.error) || "删除失败"); return; }
+						const info = d.data || {};
+						setReport({ name: it.name, ...info });
+						setMsg(info.ok
+							? "已删除 " + it.name + "：删掉 " + ((info.removed || []).length) + " 项，复核干净"
+							: "已经尽力删了，但还有 " + ((info.remaining || []).length) + " 项残留（见下面的报告）");
+						load(); loadPresets(); loadOrphans();
+					})
+					.catch((e) => setMsg("删除失败：" + String(e)))
+					.finally(() => setBusy(""));
+			}
+
 			const items = data || [];
 			const card = { border: "1px solid var(--dsw-alias-border-l2, #e6e6e6)", borderRadius: "10px", padding: "12px 14px", marginTop: "8px" };
 			const barOuter = { height: "4px", borderRadius: "2px", background: "var(--dsw-alias-border-l2, #e5e5e5)", overflow: "hidden", marginTop: "8px" };
 			const barInner = (p) => ({ height: "100%", width: p + "%", background: "var(--dsw-alias-button-primary-fill, #0a3)", transition: "width .2s linear" });
+			// 进度不再"假装"：我们自己驱动 pnpm，它每开始下一个包就报这个包的字节数、下完再报一次，
+			// received / total 是这两者累加出来的真数字（所以只在真有字节时才画bar）。
+			const fmtBytes = (n) => {
+				const v = Number(n || 0);
+				if (v < 1024) return v + " B";
+				if (v < 1048576) return (v / 1024).toFixed(1) + " KB";
+				if (v < 1073741824) return (v / 1048576).toFixed(1) + " MB";
+				return (v / 1073741824).toFixed(2) + " GB";
+			};
+			const PHASE_LABEL = {
+				resolving: "解析依赖", fetching: "下载", importing: "写入 node_modules",
+				applying: "写 bundle 行", verifying: "复核磁盘", done: "完成", error: "失败",
+				installing: "官方安装器在跑",
+			};
+			const pre = {
+				fontSize: 11, lineHeight: 1.55, fontFamily: "ui-monospace, Consolas, monospace",
+				whiteSpace: "pre-wrap", wordBreak: "break-all", background: "var(--dsw-alias-bg-layer-2, #f6f6f6)",
+				border: "1px solid var(--dsw-alias-border-l2, #e6e6e6)", borderRadius: 6,
+				padding: "8px 10px", marginTop: 6, maxHeight: 200, overflow: "auto",
+			};
+			const copyText = (text) => {
+				try { navigator.clipboard.writeText(text); setMsg("已复制到剪贴板"); }
+				catch (e) { setMsg("复制失败：展开日志手动选中那段文本吧"); }
+			};
+			const logBox = (text) => react.createElement("div", null,
+				react.createElement("div", { style: { display: "flex", gap: 8, marginTop: 6 } },
+					react.createElement("button", { style: S.btn, onClick: () => copyText(text) }, "复制"),
+					react.createElement("button", { style: S.btn, onClick: () => setShowLog((v) => !v) }, showLog ? "收起日志" : "展开日志")),
+				showLog ? react.createElement("pre", { style: pre }, text || "（没有日志）") : null);
 			const small = { fontSize: "11px", color: "var(--dsw-alias-label-secondary, #888)", marginTop: "4px" };
 			const chip = (text, tone) => react.createElement("span", {
 				style: {
@@ -3339,40 +3610,155 @@ function PetOptions() {
 			const problems = (presets || []).reduce((n, p) => n + ((p.issues || []).length), 0);
 			return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
 				react.createElement("div", { style: S.label }, "子代理驱动"),
-				react.createElement("div", { style: S.sub }, "Codex CLI / Claude Code SDK 不随安装包发布（合计约 590 MB），用到再下；装好后预设里对应的行会自动启用"),
+				react.createElement("div", { style: S.sub }, "Codex CLI / Claude Code SDK 不随安装包发布（合计约 590 MB），用到再下。装的是跟内核同版本的那一版。"),
+				react.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" } },
+					react.createElement("span", { style: S.sub }, "安装源"),
+					react.createElement("select", {
+						style: S.select, value: reg, disabled: !!busy,
+						onChange: (e) => setReg(e.target.value),
+					},
+						react.createElement("option", { value: "" }, "跟 pnpm 的配置走（默认）"),
+						react.createElement("option", { value: "https://registry.npmjs.org" }, "registry.npmjs.org"),
+						react.createElement("option", { value: "https://registry.npmmirror.com" }, "registry.npmmirror.com（国内镜像）"))),
+				verErr
+					? react.createElement("div", { style: { fontSize: 11, color: "#b45309", marginTop: 6, display: "flex", gap: 8, alignItems: "center" } },
+						verErr,
+						react.createElement("button", { style: S.btn, disabled: !!busy, onClick: () => loadVersions() }, "重试"))
+					: null,
 				items.map((it) => {
-					const running = st && st.id === it.id && st.phase === "downloading";
-					const pct = running && st.total > 0 ? Math.min(100, Math.round((st.received / st.total) * 100)) : 0;
+					const running = !!(st && st.id === it.id && st.running);
+					const leftover = !it.installed && (it.pluginPresent || it.sdkPresent);
 					return react.createElement("div", { key: it.id, style: card },
 						react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" } },
 							react.createElement("div", null,
 								react.createElement("span", { style: S.value }, it.name),
-								chip(it.installed ? "已安装" : "未安装", it.installed ? "on" : ""),
-								!it.pluginPresent ? chip("插件缺失", "") : null
+								it.installed
+									? chip("已安装" + (it.version ? " " + it.version : ""), "on")
+									: (leftover ? chip("残留（有文件没登记）", "") : chip("未安装", "")),
+								it.installed && it.missing && it.missing.length ? chip("依赖缺失 " + it.missing.length + " 个", "") : null,
+								it.pluginPresent && !it.installed ? chip("缺依赖条目", "") : null
 							),
 							react.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexShrink: 0 } },
-								react.createElement("span", { style: S.sub }, fmtMB(it.packages.reduce((n, p) => n + (p.approx || 0), 0))),
+								react.createElement("span", { style: S.sub }, fmtMB(it.approx || 0)),
+								// 版本下拉：默认选"与内核同版本"的那一版（provider 是按内核版本一起发的，
+								// npm 的 latest 是 0.0.1-rc.1 远古版，装它会被官方 peer 校验拒掉）。
+								!it.installed && !running
+									? react.createElement("select", {
+										style: S.select, disabled: !!busy,
+										value: chosenVersion(it),
+										onChange: (e) => setPick((prev) => ({ ...prev, [it.id]: e.target.value })),
+									}, versionOptions(it).map((v) => react.createElement("option", { key: v.value, value: v.value }, v.label)))
+									: null,
 								running
 									? react.createElement("button", { style: S.btn, disabled: !!busy, onClick: () => post("/api/ds-zhuzhu-use/drivers/cancel", {}, (d) => { setSt(d); setMsg("已取消"); }) }, "取消")
-									: it.installed
-										? react.createElement("button", { style: S.btn, disabled: !!busy, onClick: () => post("/api/ds-zhuzhu-use/drivers/remove", { id: it.id }, () => { setMsg("已删除 " + it.name); load(); loadPresets(); }) }, "删除")
-										: react.createElement("button", { style: S.btnPrimary, disabled: !!busy, onClick: () => post("/api/ds-zhuzhu-use/drivers/install", { id: it.id }, (d) => setSt(d)) }, "下载并安装")
+									: react.createElement(react.Fragment, null,
+										// 删除**无条件**：装好的能删，半装的残留也能删。后端先摘 bundle 行、
+										// 再 pnpm remove、再直接删目录，最后复核并把"删了什么/还剩什么"列出来。
+										(it.installed || it.pluginPresent || it.sdkPresent)
+											? react.createElement("button", { style: S.btn, disabled: !!busy, onClick: () => removeDriver(it) }, it.installed ? "删除" : "清理残留")
+											: null,
+										react.createElement("button", {
+											style: S.btnPrimary, disabled: !!busy,
+											onClick: () => post("/api/ds-zhuzhu-use/drivers/install",
+												{ id: it.id, version: chosenVersion(it), registry: reg },
+												(d) => { setSt(d); setReport(null); }),
+										}, it.installed ? "重新安装" : "下载并安装"))
 							)
 						),
 						react.createElement("div", { style: S.sub }, it.note),
+						// 包清单只在"还没装"或"缺了东西"时才列；装齐了就不占地方。
+						(!it.installed || (it.missing && it.missing.length > 0)) && (it.packages || []).length > 0
+							? react.createElement("div", { style: { ...small, marginTop: 4 } },
+								(it.packages || []).map((p) => react.createElement("div", { key: p.name, style: { display: "flex", justifyContent: "space-between", gap: 12 } },
+									react.createElement("span", { style: { wordBreak: "break-all" } }, (p.present ? "✓ " : "✗ ") + p.name),
+									react.createElement("span", { style: { flexShrink: 0 } }, (p.present ? (p.version || "已装") + " · " : "") + fmtMB(p.approx || 0)))))
+							: null,
 						running
 							? react.createElement("div", null,
-								react.createElement("div", { style: barOuter }, react.createElement("div", { style: barInner(pct) })),
+								react.createElement("div", { style: { ...small, marginTop: 8 } },
+									(PHASE_LABEL[st.phase] || st.phase) +
+									(st.phase === "fetching" || st.phase === "importing"
+										? " · 当前 " + (st.part || "…")
+										: (st.spec ? " · " + st.spec : "")) +
+									(st.speed ? " · " + fmtBytes(st.speed) + "/s" : "")),
+								react.createElement("div", { style: barOuter }, react.createElement("div", { style: barInner(st.pct || 0) })),
 								react.createElement("div", { style: small },
-									"第 " + st.index + "/" + st.totalParts + " 个包 · " + (st.part || "") + " · " + pct + "% · " +
-									fmtMB(st.received) + (st.speed ? " · " + fmtMB(st.speed) + "/s" : ""))
-							)
+									"已下 " + fmtBytes(st.received) + " / " +
+									(st.total > 0 ? fmtBytes(st.total) + "（已公布的包合计）" : "总量未知") +
+									" · 下完 " + st.fetched + " 个包" +
+									(st.resolved ? " · 已解析 " + st.resolved : "") +
+									(st.imported ? " · 已落盘 " + st.imported : "")),
+								react.createElement("div", { style: small },
+									(st.registry ? "源 " + st.registry + " · " : "") +
+									(st.mode === "own" ? "我们自己的安装器（内核自带的 pnpm）" : "官方插件管理器兜底") +
+									(st.startedAt ? " · 已用 " + Math.max(0, Math.round((Date.now() - st.startedAt) / 1000)) + "s" : "")))
 							: null,
-						it.installed
-							? react.createElement("div", { style: { ...small, wordBreak: "break-all" } }, "装在：" + it.installDir)
-							: null
+						st && st.phase === "error" && st.id === it.id
+							? react.createElement("div", { style: { marginTop: 8, fontSize: 11, color: "#b91c1c", wordBreak: "break-all" } },
+								"失败：" + (st.error || "未知错误"),
+								logBox((st.log || []).join("\n")))
+							: null,
+						st && st.phase === "done" && st.id === it.id
+							? react.createElement("div", { style: { marginTop: 8 } },
+								react.createElement("div", { style: small }, st.detail || "装好了"),
+								react.createElement("div", { style: { marginTop: 6 } },
+									react.createElement("button", { style: S.btn, onClick: () => setShowDone((v) => !v) }, showDone ? "收起详情" : "详情")),
+								showDone
+									? react.createElement("div", null,
+										(st.written || []).map((line, i) => react.createElement("div", { key: i, style: { ...small, wordBreak: "break-all" } }, "· " + line)),
+										(st.checks || []).map((c, i) => react.createElement("div", {
+											key: i,
+											style: { ...small, wordBreak: "break-all", color: c.ok ? "var(--dsw-alias-label-secondary, #888)" : "#b91c1c" },
+										}, (c.ok ? "✓ " : "✗ ") + c.label + "：" + c.detail)),
+										logBox((st.log || []).join("\n")))
+									: null)
+							: null,
+						null
 					);
 				}),
+
+				// 删除的复核报告：删了什么 / 还剩什么 / 哪一步失败了 —— 失败绝不吞掉。
+				report
+					? react.createElement("div", { style: card },
+						react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 } },
+							react.createElement("span", { style: S.value }, "删除报告：" + (report.name || "")),
+							report.ok ? chip("复核干净", "on") : chip("还有残留", "")),
+						react.createElement("div", { style: small }, (report.removed || []).length
+							? "实际删掉 " + report.removed.length + " 项："
+							: "没有任何东西可删（本来就没装）"),
+						(report.removed || []).map((r, i) => react.createElement("div", { key: i, style: { ...small, wordBreak: "break-all" } }, "· " + r)),
+						(report.remaining || []).map((r, i) => react.createElement("div", { key: "r" + i, style: { ...small, wordBreak: "break-all", color: "#b91c1c" } }, "✗ 还剩：" + r)),
+						(report.failures || []).map((r, i) => react.createElement("div", { key: "f" + i, style: { ...small, wordBreak: "break-all", color: "#b91c1c" } }, "! " + r)),
+						(report.notes || []).map((r, i) => react.createElement("div", { key: "n" + i, style: small }, "· " + r)),
+						(report.elsewhere || []).map((r, i) => react.createElement("div", { key: "e" + i, style: { ...small, wordBreak: "break-all" } }, "· " + r)),
+						report.note ? react.createElement("div", { style: small }, report.note) : null,
+						logBox(JSON.stringify(report, null, 2)))
+					: null,
+
+				// 无主依赖：删掉 provider 之后没人再引用的传递依赖。先列出来，点了才删。
+				orphans.length > 0
+					? react.createElement("div", { style: { ...small, display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" } },
+						"另有 " + orphans.length + " 个无主依赖 · " + fmtMB(orphans.reduce((n, o) => n + (o.bytes || 0), 0)),
+						react.createElement("button", { style: S.btn, disabled: !!busy, onClick: () => setShowOrphans((v) => !v) }, showOrphans ? "收起" : "看看是哪些"),
+						react.createElement("button", {
+							style: S.btn, disabled: !!busy,
+							onClick: () => post("/api/ds-zhuzhu-use/drivers/orphans/clean", {}, (d) => { setOrphanReport(d); loadOrphans(); }),
+						}, "清理"))
+					: null,
+				showOrphans
+					? react.createElement("div", { style: { ...small, marginTop: 4 } },
+						orphans.slice(0, 30).map((o) => react.createElement("div", { key: o.name, style: { display: "flex", justifyContent: "space-between", gap: 12 } },
+							react.createElement("span", { style: { wordBreak: "break-all" } }, o.name + (o.version ? "@" + o.version : "")),
+							react.createElement("span", { style: { flexShrink: 0 } }, fmtMB(o.bytes || 0)))),
+						orphans.length > 30 ? react.createElement("div", null, "…还有 " + (orphans.length - 30) + " 个（点了清理一起删）") : null)
+					: null,
+				orphanReport
+					? react.createElement("div", { style: { ...small, marginTop: 6 } },
+						"无主依赖清理：删掉 " + ((orphanReport.removed || []).length) + " 项 · " + fmtMB(orphanReport.bytes || 0) +
+						(orphanReport.ok ? "，复核干净" : "，还有 " + ((orphanReport.remaining || []).length) + " 项没清掉"),
+						(orphanReport.failures || []).map((r, i) => react.createElement("div", { key: i, style: { color: "#b91c1c", wordBreak: "break-all" } }, "! " + r)),
+						(orphanReport.note ? react.createElement("div", null, orphanReport.note) : null))
+					: null,
 
 				react.createElement("div", { style: { height: 1, background: "var(--dsw-alias-border-l2, #eee)", margin: "14px 0 6px" } }),
 				react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" } },
@@ -3525,6 +3911,11 @@ function PetsSection() {
 				}, guarded(SubagentSection))
 			);
 
+			// 插件更新不再占设置分区：入口挪到「插件」页（“添加插件”左边那个按钮），面板走 shell.overlay。
+			ctx.slots.inject("shell.overlay", () =>
+				ctx.slots.register({ name: "shell.overlay", id: "ds_zhuzhu_use-plugin-update", order: 70 }, PluginUpdateOverlay)
+			);
+
 			// 「软件信息」已下线：转向官方桌面端之后版本/反馈/更新都由官方自己管，
 			// 这一页留着只会显示旧外壳的版本号与我们的 GitHub release 列表，反而误导。
 			// 组件本身保留在文件里（AboutSection），需要时可以一行挂回来。
@@ -3618,6 +4009,8 @@ dpRegister({ id: PV_SLIDES, extensions: ["pptx", "ppt"], priority: "extension", 
 			// 官方桌面端自带更新源，这里再挂一个只会把人带回到旧壳子上。
 			// 组件 UpdateFooterAction 保留在文件里，需要时一行挂回来。
 			shortenWindowTitle();
+			installPluginUpdateButton();
+			installUpdateStyles();
 			apply(ctx);
 		}
 

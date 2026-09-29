@@ -6,7 +6,13 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.3.0`** —— 相对 0.2.0 只做**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例），功能不变；已发布到 npm 官方源。
+**当前版本 `0.3.3`**（npm latest）—— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
+
+- **子代理驱动管理**（设置 →「子代理」）：Codex CLI / Claude Code SDK 两个可选 provider 可单独装、单独删（自研 pnpm 驱动、NDJSON 事件流进度、可取消可重试、装完复核三项清单、删除含 `.pnpm` 真内容与孤儿清理）
+- **插件更新管理**：检查更新 / 单个更新 / 全部更新
+- **Agent 预设修复**：内核升级改名后一键修 profile 里的旧行
+- **宠物按需安装/卸载**：下载进度、取消、卸载
+- 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
 
 > ⚠️ **更名说明**：旧包 [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use)（0.2.0）已弃用，新包为 [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use)。
 > 两者**不能同时安装**（插件行 id 与模块名都变了，同时存在会在 profile 里留下悬空行）。
@@ -17,6 +23,36 @@
 - **内嵌 DeepSeek 网页版**（Chat 面板）：走官方外壳的「侧栏浏览器租约」通道挂载（官方 0.1.7 起只放行带租约的 guest）
 - 宠物系统、文档预览（Office → PDF）、会话版本管理、桌面插件管理、设置分区
 - 每个设置分区**独立容错**：某一块渲染失败只影响那一块，不会把整张设置页带崩
+
+## 子代理驱动（Codex CLI / Claude Code SDK）
+
+设置 →「子代理」里可以单独装、单独删这两个可选 provider
+（`@deepseek-ai/dsh-subagent-codex` / `@deepseek-ai/dsh-subagent-claude-code`，加起来约 590 MB，
+所以不随安装包发布）。
+
+**为什么不用官方插件管理器的安装入口**：它把 pnpm 整段黑箱跑完才回话，进度只能靠猜；
+而且有「pnpm 静默 10 分钟就杀」的 idle 超时 —— 超时后它把清单回滚，可几百 MB 的文件已经落盘，
+于是留下「有文件、没人认、删除删不掉」的半装状态。我们自己驱动内核自带的 pnpm：
+
+- 进度是 **pnpm 的 NDJSON 事件流**：每个包开始下载时报它的字节数、下完再报一次，
+  所以「已下 X MB / 共 Y MB（已公布的包合计）」是真的；解析数、下完数、落盘数也分别计数。
+- **可取消**（Windows 上杀整棵进程树）、**可重试**（换安装源后重点一次，已下过的不会重下）、
+  失败时把 pnpm 的原始输出留在「展开日志」里，可以直接复制。
+- 装完**复核三项**：provider 目录 / profile 的依赖条目 / `dsh.profile.bundles` 里的 bundle 行。
+  三样齐了内核才会挂载它 —— 这也解释了「插件页不认」：
+  官方插件页是从 profile 清单（依赖 + bundle 行）列出来的，文件在磁盘上但清单里没有条目时，
+  它**不可能**显示出来。装完我们会把「写了什么」列出来，方便和插件页对账。
+- 删除**无条件执行**：先摘 bundle 行 → 官方侧卸一次 → `pnpm remove` → 直接删目录
+  （`node_modules/<包>` **和** `.pnpm/<entry>` 里那份，后者才是几百 MB 的真内容）
+  → 目录没了而依赖条目还在就把条目也摘掉 → 复核并如实报出「删了什么 / 还剩什么 / 哪一步失败」。
+  `~/.dsh/profiles/node_modules`（所有 profile 共用的兜底目录）只报告、不删，免得把 web 那个
+  profile 一起弄坏。
+
+想离线确认「装没装、装在哪」：
+
+```sh
+node werk/driver-probe.mjs <插件目录> --profile %USERPROFILE%\.dsh\profiles\desktop
+```
 
 ## 官方插件格式
 
@@ -68,8 +104,8 @@ dsh-plugin-zhuzhu-use
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.0.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.0.tgz` 的**绝对路径** |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.3.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.3.tgz` 的**绝对路径** |
 | **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
@@ -78,7 +114,7 @@ dsh-plugin-zhuzhu-use
 ### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.0.tgz"   # 本地 tgz（本分支根目录）
+npm install ".\dsh-plugin-zhuzhu-use-0.3.3.tgz"   # 本地 tgz（本分支根目录）
 npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
@@ -139,7 +175,7 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Current version `0.3.0`** — a pure rename from 0.2.0 (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention), functionality unchanged; published to the npm registry.
+**Current version `0.3.3`** (npm latest) — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
 
 > ⚠️ **Rename notice**: the old package [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use) (0.2.0) is deprecated; the new one is [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use). Do not install both — the plugin row id and the module name both changed, and keeping both leaves a dangling row in the profile.
 
@@ -159,8 +195,8 @@ It is published to the npm registry, so the installer fetches it automatically (
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.0.tgz` |
-| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.0.tgz` at the branch root |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.3.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.3.tgz` at the branch root |
 | **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
 > A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
@@ -168,7 +204,7 @@ It is published to the npm registry, so the installer fetches it automatically (
 **Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.0.tgz"   # local tarball from this branch
+npm install ".\dsh-plugin-zhuzhu-use-0.3.3.tgz"   # local tarball from this branch
 npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use

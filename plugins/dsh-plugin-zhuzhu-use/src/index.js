@@ -30,6 +30,7 @@ import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { once } from 'node:events'
+import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
@@ -68,6 +69,349 @@ const updateState = {
 
 function dshHome() {
   return process.env.DSH_HOME || join(process.env.USERPROFILE || homedir(), '.dsh')
+}
+
+/**
+ * 当前活动 profile 目录（`<dshHome>/profiles/<名字>`）。
+ *
+ * host 进程的 argv 里就带着它（例如 `C:\Users\Windows\.dsh\profiles\desktop`）：官方桌面版跑
+ * 的是 desktop profile，官方 web/CLI 跑的是 web profile。以前这里写死 `profiles/web`，
+ * 于是桌面版里"装了驱动却没生效"——包被塞进了另一个 profile。现在按 argv 取，两边通吃。
+ */
+function activeProfileDir() {
+  for (const arg of process.argv) {
+    if (typeof arg !== 'string' || arg.length < 8 || arg.startsWith('-')) continue
+    // 容忍重复分隔符/斜杠混用（Windows 与 POSIX 都适用），但原样保存路径本身。
+    const candidate = arg.replace(/[\\/]+$/, '')
+    if (!/[\\/]+profiles[\\/]+[^\\/]+$/.test(candidate)) continue
+    try {
+      if (existsSync(join(candidate, 'package.json'))) return candidate
+    } catch (_) { /* 试下一个 */ }
+  }
+  // 老外壳 / 网页版：argv 里没有 profile，退回原来的位置。
+  return join(dshHome(), 'profiles', 'web')
+}
+
+/** 活动 profile 的 node_modules：profile 插件（含本插件要装的驱动）就落在这里。 */
+function activeProfileModules() {
+  return join(activeProfileDir(), 'node_modules')
+}
+
+/** 显示用的短路径：profile 里的东西只显示 node_modules/... 那一段（整条 C:\… 太长了）。 */
+function shortPath(p) {
+  const text = String(p || '')
+  try {
+    const base = activeProfileDir()
+    if (text.toLowerCase().startsWith(base.toLowerCase())) return text.slice(base.length).replace(/^[\\/]+/, '') || '.'
+  } catch (_) { /* 拿不到 profile 就原样返回 */ }
+  return text
+}
+
+/** 官方插件管理器（内核 0.2.0 起在 host 侧提供 `pluginManager`）。 */
+function officialPluginManager(ctx) {
+  try {
+    const pm = ctx && typeof ctx.get === 'function' ? ctx.get('pluginManager') : undefined
+    return pm && typeof pm.installBundle === 'function' && typeof pm.listBundles === 'function' ? pm : undefined
+  } catch (_) {
+    return undefined
+  }
+}
+
+/** 把官方安装器的失败原因翻译成人话（原始诊断仍附在后面，便于排查）。 */
+function explainOfficialError(result, fallback) {
+  const error = result && result.error
+  const diagnostic = String((error && (error.diagnostic || error.message || error.detail)) || '')
+  if (error && error.code === 'incompatible-version') {
+    return '这个版本与当前内核不匹配（provider 必须和内核同版本安装）'
+  }
+  if (/MINIMUM_RELEASE_AGE|minimumReleaseAge/i.test(diagnostic)) {
+    return '被 pnpm 的"最小发布年龄"策略拦住：刚发布的版本在冷却期内会被拒绝（默认 24 小时）。'
+      + '给 profile 的 pnpm-workspace.yaml 加 `minimumReleaseAge: 0`（或用 minimumReleaseAgeExclude 单独放行）后重试'
+  }
+  if (/UND_ERR_DESTROYED|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(diagnostic)) {
+    return '网络中断（registry 连接被重置或超时），稍后重试'
+  }
+  return fallback
+}
+
+/** 官方管理器里这些 provider bundle 的状态：装没装、开没开、什么版本。 */
+async function officialBundles(ctx) {
+  const pm = officialPluginManager(ctx)
+  if (!pm) return { available: false, bundles: [] }
+  try {
+    const list = await pm.listBundles()
+    return {
+      available: true,
+      bundles: Array.isArray(list)
+        ? list.map((b) => ({ name: b.name, version: b.version, enabled: !!b.enabled, installed: !!b.installed }))
+        : [],
+    }
+  } catch (error) {
+    return { available: true, bundles: [], error: String((error && error.message) || error) }
+  }
+}
+
+/**
+ * 运行中的内核版本（`<app.asar>/dsh/package.json` 的 version）。
+ *
+ * 子代理那两个 provider 包在 npm 上是**按内核版本一起发**的（`@deepseek-ai/dsh-subagent-codex`
+ * 有 0.0.1-rc.1 … 0.2.0-rc.1 一长串），而 `latest` 指向的是远古的 0.0.1-rc.1 —— 直接装 latest
+ * 会被官方的 peer 兼容校验拒掉（`incompatible-version`）。所以必须按内核版本装。
+ */
+function kernelRuntimeVersion() {
+  try {
+    const asar = asarPathFromHostArgv()
+    if (!asar) return ''
+    const manifest = join(asar, 'dsh', 'package.json')
+    if (!existsSync(manifest)) return ''
+    const version = JSON.parse(readFileSync(manifest, 'utf8')).version
+    return typeof version === 'string' ? version : ''
+  } catch (_) {
+    return ''
+  }
+}
+
+/**
+ * registry 上某个包发布过的版本（新→旧），以及它的 latest 标签。
+ * （导出只是为了让离线自测能直接调用它，内核只认 apply/name/inject。）
+ */
+export async function npmVersions(name) {
+  const doc = await registryDoc(name)
+  const versions = Object.keys(doc && doc.versions ? doc.versions : {})
+  if (versions.length === 0) return { versions: [], latest: '', error: doc ? 'registry 没有版本信息' : '两个源都连不上（npmjs / npmmirror）' }
+  versions.sort((a, b) => compareVersions(b, a))
+  return { versions, latest: (doc['dist-tags'] && doc['dist-tags'].latest) || '' }
+}
+
+/**
+ * 离线自检入口（内核只认 name / inject / apply，多导出一个对象不影响它）。
+ * 给 werk/driver-probe.mjs 用：不启动内核也能验证"工具链找得到、状态判定看的是磁盘"。
+ */
+export const __drivers = {
+  list: () => SUBAGENT_DRIVERS.map((d) => ({ id: d.id, plugin: d.plugin, heavy: d.heavy })),
+  status: () => SUBAGENT_DRIVERS.map((d) => ({ id: d.id, name: d.name, ...driverDiskStatus(d) })),
+  toolchain: () => {
+    const t = driverToolchain()
+    return t ? { found: true, node: t.node, pnpm: t.pnpm, envNode: !!t.envNode, label: t.label } : { found: false }
+  },
+  resources: () => driverResourcesDirs(),
+  profile: () => activeProfileDir(),
+  kernel: () => kernelRuntimeVersion(),
+  orphans: () => profileOrphans(),
+  short: (p) => shortPath(p),
+  state: () => drvState(),
+}
+
+// ==================== 插件更新（官方插件页只给装/停/删，没有"更新"） ====================
+// 内核的 pluginManager.installBundle(spec) 本来就能原地升级（它自己跑 pnpm），缺的是个入口。
+// 这一块把 profile 里"按 npm 装的插件"列出来，比对 registry 的 latest，点一下就地更新。
+
+/** host 的 argv 里带着内核的 pnpm 与 node bin（老外壳靠它们做兜底安装）。 */
+function hostRuntimePaths() {
+  let pnpm = ''
+  let nodeBin = ''
+  for (const arg of process.argv) {
+    if (typeof arg !== 'string' || arg.startsWith('-')) continue
+    const p = arg.replace(/[\\/]+$/, '')
+    if (pnpm === '' && /[\\/]pnpm[\\/]bin[\\/]pnpm\.mjs$/i.test(p)) pnpm = p
+    else if (nodeBin === '' && /[\\/]runtime[\\/]bin$/i.test(p)) nodeBin = p
+  }
+  return { pnpm, nodeBin }
+}
+
+function readProfileManifest() {
+  try { return JSON.parse(readFileSync(join(activeProfileDir(), 'package.json'), 'utf8')) } catch (_) { return null }
+}
+
+/** 已安装版本：只有真装到 profile 的 node_modules 里才算。 */
+function installedPluginVersion(name) {
+  try {
+    const p = join(activeProfileModules(), ...String(name).split('/'), 'package.json')
+    if (!existsSync(p)) return ''
+    const pkg = JSON.parse(readFileSync(p, 'utf8'))
+    return typeof pkg.version === 'string' ? pkg.version : ''
+  } catch (_) { return '' }
+}
+
+const latestCache = { map: new Map() }
+// 注意：NPM_REGISTRY 在本文件后面才声明，这里必须惰性求值，否则模块加载时就 TDZ 报错
+// （0.3.2 就是这么挂的：failed to import）。
+const registryCandidates = () => [NPM_REGISTRY, 'https://registry.npmmirror.com']
+
+// 版本/最新版查询：两个源**并行抢最快**，各自 8 秒超时；结果在本次运行内缓存。
+// （只等 npmjs 的话，国内网络下这个页面会一直卡在"读取版本列表…"。）
+const registryDocs = new Map()
+async function registryDoc(name) {
+  const key = String(name)
+  const hit = registryDocs.get(key)
+  if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.doc
+  const request = async (registry) => {
+    const res = await fetch(registry + '/' + key.replace('/', '%2f'),
+      { redirect: 'follow', signal: AbortSignal.timeout(8000) })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    return await res.json()
+  }
+  try {
+    const doc = await Promise.any(registryCandidates().map(request))
+    registryDocs.set(key, { at: Date.now(), doc })
+    return doc
+  } catch (_) {
+    return undefined
+  }
+}
+
+/** registry 上的 latest 版本；带 5 分钟缓存，force 时强制重取。 */
+async function npmLatestVersion(name, force) {
+  const now = Date.now()
+  const hit = latestCache.map.get(name)
+  if (!force && hit && now - hit.at < 5 * 60 * 1000) return hit.version
+  const doc = await registryDoc(name)
+  const latest = doc && doc['dist-tags'] && doc['dist-tags'].latest
+  if (typeof latest === 'string' && latest !== '') {
+    latestCache.map.set(name, { at: now, version: latest })
+    return latest
+  }
+  return hit ? hit.version : ''
+}
+
+/** `0.3.10` > `0.3.9` 这种比较；预发布版按 semver 的直觉排在正式版前。 */
+function compareVersions(a, b) {
+  const split = (v) => String(v || '').split('-')[0].split('.').map((x) => parseInt(x, 10) || 0)
+  const [x, y] = [split(a), split(b)]
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0)
+    if (d !== 0) return d > 0 ? 1 : -1
+  }
+  const preA = String(a || '').includes('-')
+  const preB = String(b || '').includes('-')
+  if (preA !== preB) return preA ? -1 : 1
+  return 0
+}
+
+/**
+ * profile 里按 npm 装的插件（link:/file: 那种是本机源码，不参与更新）。
+ * （导出只是为了让离线自测能直接调用它，内核只认 apply/name/inject。）
+ */
+export async function pluginInventory(ctx, force) {
+  const profile = activeProfileDir()
+  const manifest = readProfileManifest()
+  const deps = (manifest && manifest.dependencies) || {}
+  const official = await officialBundles(ctx)
+  const items = []
+  for (const name of Object.keys(deps)) {
+    const range = String(deps[name] || '')
+    // 只比 npm registry 上的版本。link:/file:/workspace:（本机源码）与
+    // github:/git+/http(s):（git 或 tarball 装的）都不该拿去和 npm 的 latest 比 ——
+    // 那样会给出"假更新"，点了还会把 git 安装换成 npm 版。
+    if (/^(link|file|workspace|portal|github|git\+|git|https?|npm):/i.test(range)) continue
+    const installed = installedPluginVersion(name)
+    const latest = await npmLatestVersion(name, !!force)
+    const bundle = official.bundles.find((b) => b.name === name)
+    items.push({
+      name,
+      range,
+      installed,
+      latest,
+      updateAvailable: !!(installed && latest && compareVersions(latest, installed) > 0),
+      enabled: bundle ? !!bundle.enabled : undefined,
+      officialBundle: !!bundle,
+    })
+  }
+  items.sort((a, b) => (b.updateAvailable ? 1 : 0) - (a.updateAvailable ? 1 : 0) || a.name.localeCompare(b.name))
+  return { profile, officialAvailable: official.available, officialError: official.error || '', items }
+}
+
+/** 更新状态：一次只跑一个，和驱动/宠物同样的取舍。 */
+const plugUp = { name: '', phase: 'idle', from: '', to: '', detail: '', restartRequired: false, error: '', updatedAt: 0 }
+
+function plugState() {
+  return { name: plugUp.name, phase: plugUp.phase, from: plugUp.from, to: plugUp.to,
+    detail: plugUp.detail, restartRequired: plugUp.restartRequired, error: plugUp.error, updatedAt: plugUp.updatedAt }
+}
+
+function plugReset(name) {
+  plugUp.name = name || ''
+  plugUp.phase = 'idle'
+  plugUp.from = ''
+  plugUp.to = ''
+  plugUp.detail = ''
+  plugUp.restartRequired = false
+  plugUp.error = ''
+  plugUp.updatedAt = Date.now()
+}
+
+/** 老外壳兜底：用内核自带的 pnpm 在 profile 里 add。 */
+async function pluginUpdateViaPnpm(name, version) {
+  const { pnpm, nodeBin } = hostRuntimePaths()
+  if (!pnpm) throw new Error('找不到内核自带的 pnpm，无法更新（请用官方插件页手动装）')
+  const spec = version ? name + '@' + version : name
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', PATH: nodeBin ? nodeBin + ';' + (process.env.PATH || '') : process.env.PATH }
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [pnpm, 'add', spec, '--dir', activeProfileDir()], {
+      cwd: activeProfileDir(), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    child.stdout.on('data', (c) => { out = (out + c).slice(-4000) })
+    child.stderr.on('data', (c) => { out = (out + c).slice(-4000) })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      plugUp.detail = out.trim().split('\n').slice(-4).join('\n')
+      if (code === 0) resolve(out)
+      else reject(new Error('pnpm 更新失败（exit ' + code + '）'))
+    })
+  })
+}
+
+function pluginUpdateStart(name, ctx) {
+  const target = String(name || '')
+  if (!target) throw new Error('没给插件名')
+  if (plugUp.phase === 'running') throw new Error('正在更新另一个插件，先等它结束')
+  plugReset(target)
+  plugUp.from = installedPluginVersion(target)
+  plugUp.phase = 'running'
+  plugUp.updatedAt = Date.now()
+  const pm = officialPluginManager(ctx)
+  ;(async () => {
+    const latest = await npmLatestVersion(target, false)
+    plugUp.to = latest
+    if (pm) {
+      // 官方安装器：pnpm 安装 + 选中 bundle +（必要时）重载，一步到位。
+      const result = await pm.installBundle(latest ? target + '@' + latest : target)
+      const application = result && result.application
+      if (application === 'failed' || (result && result.error)) {
+        const detail = result && result.error && (result.error.message || result.error.detail || result.error)
+        throw new Error('官方安装器更新失败：'
+          + explainOfficialError(result, detail ? (typeof detail === 'string' ? detail : JSON.stringify(detail)) : target))
+      }
+      plugUp.restartRequired = application === 'restart-required'
+      plugUp.detail = '官方安装器：' + String(application || 'applied')
+    } else {
+      await pluginUpdateViaPnpm(target, latest)
+    }
+    plugUp.phase = 'done'
+    plugUp.updatedAt = Date.now()
+  })().catch((e) => {
+    plugUp.phase = 'error'
+    plugUp.error = e && e.message ? e.message : String(e)
+    plugUp.updatedAt = Date.now()
+  })
+  return plugState()
+}
+
+async function pluginUpdateAll(ctx) {
+  const report = await pluginInventory(ctx, true)
+  const list = report.items.filter((i) => i.updateAvailable).map((i) => i.name)
+  if (list.length === 0) return { started: [], detail: '没有可更新的插件' }
+  // 串行：pnpm 在同一个 profile 上并发跑会互相踩 lock。
+  ;(async () => {
+    for (const name of list) {
+      try {
+        pluginUpdateStart(name, ctx)
+        while (plugUp.phase === 'running') await new Promise((r) => setTimeout(r, 500))
+      } catch (_) { /* 单个失败继续下一个，错误留在 plugUp.error 里 */ }
+    }
+  })()
+  return { started: list }
 }
 
 // ==================== 官方壳子：内嵌网页的分区持久化补丁 ====================
@@ -822,14 +1166,15 @@ const PET_PLUGINS = [
   'dsh-dafeiyu',
 ]
 
-const petsManifestPath = () => join(dshHome(), 'profiles', 'web', 'package.json')
+// 宠物插件同样"按 profile 装"：必须落在**当前活动** profile 的清单上。
+const petsManifestPath = () => join(activeProfileDir(), 'package.json')
 
 function petsReport() {
   const manifestPath = petsManifestPath()
   let pkg = null
   try { pkg = JSON.parse(readFileSync(manifestPath, 'utf8')) } catch (_) { return { items: [], manifestPath, missing: true } }
   const bundles = (pkg.dsh && pkg.dsh.profile && Array.isArray(pkg.dsh.profile.bundles)) ? pkg.dsh.profile.bundles : []
-  const nm = join(dshHome(), 'profiles', 'web', 'node_modules')
+  const nm = activeProfileModules()
   const items = PET_PLUGINS.map((name) => ({
     name,
     present: existsSync(join(nm, ...name.split('/'))),
@@ -1454,7 +1799,8 @@ function petUninstall(id) {
 // 装到 **profile 的 node_modules**（`~/.dsh/profiles/web/node_modules/<scope>/<name>`）——
 // 那是内核解析这两个插件依赖的地方（它们就在那儿），用户目录可写、不需要管理员。
 const NPM_REGISTRY = 'https://registry.npmjs.org'
-const profileWebModules = () => join(dshHome(), 'profiles', 'web', 'node_modules')
+// 名字保留（调用点多），位置改成**当前活动 profile**的 node_modules。
+const profileWebModules = () => activeProfileModules()
 const profileRootModules = () => join(dshHome(), 'profiles', 'node_modules')
 /** 内核自带的 node_modules：从解析到的 @deepseek-ai/dsh 位置推出来（不靠猜路径）。 */
 const runtimeModules = () => {
@@ -1471,13 +1817,10 @@ const SUBAGENT_DRIVERS = [
     note: 'subagent_codex 用（自己的 Codex 账号与额度）',
     plugin: '@deepseek-ai/dsh-subagent-codex',
     row: 'tool-subagent-codex',
-    packages: [
-      // 注意 @openai/codex 的写法：平台包是**同一个包名的另一个版本**
-      // （`0.153.4-win32-x64`，npm 里通过 alias 装成 `@openai/codex-win32-x64`），
-      // 所以下载地址用 registry 的包名 + 版本，落盘目录用 alias 名。
-      { installAs: '@openai/codex', registry: '@openai/codex', version: '0.153.4', approx: 13 * 1024 },
-      { installAs: '@openai/codex-win32-x64', registry: '@openai/codex', version: '0.153.4-win32-x64', approx: 129 * 1024 * 1024 },
-    ],
+    // provider 自己会拖上这几个重包（几百 MB）。它们跟 provider 装在同一个 profile 里，
+    // 「删除」必须把它们一起清掉 —— 否则用户点了删除，377 MB 还躺在磁盘上。
+    // 真实的依赖闭包由 pnpm 展开（见 drvOwnInstall），这里只是登记的"要一起删 / 要检查"的重包。
+    heavy: ['@openai/codex', '@openai/codex-win32-x64'],
   },
   {
     id: 'claude',
@@ -1485,12 +1828,17 @@ const SUBAGENT_DRIVERS = [
     note: 'subagent_claude_code 用（自己的 Claude 账号与额度）',
     plugin: '@deepseek-ai/dsh-subagent-claude-code',
     row: 'tool-subagent-claude-code',
-    packages: [
-      { installAs: '@anthropic-ai/claude-agent-sdk', registry: '@anthropic-ai/claude-agent-sdk', version: '0.3.263', approx: 4.8 * 1024 * 1024 },
-      { installAs: '@anthropic-ai/claude-agent-sdk-win32-x64', registry: '@anthropic-ai/claude-agent-sdk-win32-x64', version: '0.3.263', approx: 208.6 * 1024 * 1024 },
-    ],
+    heavy: ['@anthropic-ai/claude-agent-sdk', '@anthropic-ai/claude-agent-sdk-win32-x64'],
   },
 ]
+
+/** 重包的大致体积。只用于"大概要下多少"的估计；真实进度按 pnpm 报的字节算，不拿这个当进度。 */
+const DRIVER_APPROX = {
+  '@openai/codex': 13 * 1024,
+  '@openai/codex-win32-x64': 377 * 1024 * 1024,
+  '@anthropic-ai/claude-agent-sdk': 4.8 * 1024 * 1024,
+  '@anthropic-ai/claude-agent-sdk-win32-x64': 216 * 1024 * 1024,
+}
 
 const driverById = (id) => SUBAGENT_DRIVERS.find((d) => d.id === String(id || '')) || null
 
@@ -1504,31 +1852,178 @@ function resolvePackageDir(name) {
   return null
 }
 
+function packageVersionAt(dir) {
+  try { return String(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version || '') } catch (_) { return '' }
+}
+
+/** profile 清单里这个依赖写的是什么；没写就是 undefined。 */
+function profileDependency(name) {
+  const manifest = readProfileManifest()
+  const deps = manifest && manifest.dependencies
+  return deps && Object.prototype.hasOwnProperty.call(deps, name) ? String(deps[name]) : undefined
+}
+
+function profileBundleRow(name) {
+  const manifest = readProfileManifest()
+  const rows = manifest && manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles
+  return Array.isArray(rows) ? rows.indexOf(name) !== -1 : false
+}
+
+/**
+ * 驱动状态**只看磁盘**：profile 的清单（依赖条目 + bundle 行）和 node_modules 里的目录。
+ *
+ * 为什么不信官方 `pluginManager.listBundles()`：它是清单的投影。官方安装器超时/失败时会把
+ * 清单回滚掉，可几百 MB 的文件已经落盘了 —— 于是它说"没装"，而用户磁盘上明明有东西：
+ * 这就是"残留 / 删除删不掉 / 点了清理反而显示已安装"的来源。所以判定以磁盘为准，
+ * 官方的说法只作为对账信息附在旁边（`official` 字段）。
+ */
+function driverDiskStatus(driver) {
+  const dir = resolvePackageDir(driver.plugin)
+  const dependency = profileDependency(driver.plugin)
+  const heavy = driver.heavy.map((name) => {
+    const at = resolvePackageDir(name)
+    return {
+      name,
+      present: !!at,
+      version: at ? packageVersionAt(at) : '',
+      dir: at || '',
+      approx: DRIVER_APPROX[name] || 0,
+    }
+  })
+  return {
+    plugin: driver.plugin,
+    present: !!dir,
+    dir: dir || '',
+    version: dir ? packageVersionAt(dir) : '',
+    dependency,
+    bundleRow: profileBundleRow(driver.plugin),
+    // "装好了" = 目录在 **且** 清单里记着它。少任何一半，内核都不会挂载它：
+    // 只有目录 -> 没人加载；只有条目 -> 加载时 resolve 失败，会把整个 profile 拖下水。
+    installed: !!dir && dependency !== undefined,
+    heavy,
+    missing: heavy.filter((h) => !h.present).map((h) => h.name),
+  }
+}
+
 function driverInstalled(driver) {
-  return driver.packages.every((p) => !!resolvePackageDir(p.installAs))
+  return driverDiskStatus(driver).installed
 }
 
-function driverReport() {
-  return SUBAGENT_DRIVERS.map((d) => ({
-    id: d.id,
-    name: d.name,
-    note: d.note,
-    plugin: d.plugin,
-    pluginPresent: !!resolvePackageDir(d.plugin),
-    installed: driverInstalled(d),
-    packages: d.packages.map((p) => ({
-      name: p.installAs,
-      version: p.version,
-      approx: p.approx,
-      present: !!resolvePackageDir(p.installAs),
-    })),
-    installDir: profileWebModules(),
-  }))
+/**
+ * 同步版的驱动状态。预设维护（presetReport / applyPresetFix）用它 —— 那两个是**同步**函数，
+ * 以前这里误调了 async 的 driverReport()，于是只要预设里出现 codex/claude 那两行，
+ * `.find()` 就在 Promise 上炸掉，整个"预设维护"跟着一起坏。
+ */
+function driverDiskReport() {
+  return SUBAGENT_DRIVERS.map((d) => ({ id: d.id, row: d.row, ...driverDiskStatus(d) }))
 }
 
-/** 下载状态：一次只跑一个驱动（和宠物、安装包同样的取舍）。 */
-const drvDl = { id: '', phase: 'idle', part: '', index: 0, totalParts: 0, received: 0, total: 0, speed: 0, error: '', updatedAt: 0 }
+async function driverReport(ctx) {
+  const official = await officialBundles(ctx)
+  const kernel = kernelRuntimeVersion()
+  return SUBAGENT_DRIVERS.map((d) => {
+    const row = official.bundles.find((b) => b.name === d.plugin)
+    const disk = driverDiskStatus(d)
+    return {
+      id: d.id,
+      name: d.name,
+      note: d.note,
+      plugin: d.plugin,
+      pluginPresent: disk.present,
+      installed: disk.installed,
+      sdkPresent: disk.heavy.length > 0 && disk.missing.length === 0,
+      missing: disk.missing,
+      version: disk.version,
+      bundleRow: disk.bundleRow,
+      dependency: disk.dependency === undefined ? '' : disk.dependency,
+      packages: disk.heavy,
+      approx: d.heavy.reduce((n, name) => n + (DRIVER_APPROX[name] || 0), 0),
+      // 我们装完到底写了什么（给用户对账）
+      wrote: {
+        dir: disk.dir,
+        dependency: disk.dependency === undefined ? '' : disk.dependency,
+        bundleRow: disk.bundleRow,
+      },
+      // 两个位置都报出来，便于对账：活动 profile 与（老的）兜底安装目录。
+      installDir: profileWebModules(),
+      profile: activeProfileDir(),
+      // 官方安装要按内核版本装（latest 是 0.0.1-rc.1，会被 peer 校验拒掉）。
+      installSpec: kernel ? d.plugin + '@' + kernel : d.plugin,
+      kernelVersion: kernel,
+      official: official.available
+        ? { available: true, installed: !!(row && row.installed), enabled: !!(row && row.enabled),
+          version: row ? row.version : undefined, error: official.error || '' }
+        : { available: false, error: official.error || '' },
+    }
+  })
+}
+
+/**
+ * 安装状态：一次只跑一个驱动（和宠物、安装包同样的取舍）。
+ *
+ * phase 是我们自己的状态机，**每个值都对应真实发生的事**，不拿阶段假装百分比：
+ *   resolving  解析依赖（pnpm 报第几个包被 resolve）
+ *   fetching   下载（pnpm 报每个包开始下载时的字节数 + 下完时的字节数）
+ *   importing  落盘（hardlink / 解包进 node_modules）
+ *   applying   我们写 profile 的 bundle 行
+ *   verifying  复核磁盘（目录 / 依赖条目 / bundle 行 / 重包）
+ *   done       完成（可能提示重启）
+ *   error      失败（error 一行话，log 里有可复制的原始输出）
+ */
+const drvDl = {
+  id: '',
+  phase: 'idle',
+  mode: '',          // own（我们自己的 pnpm 驱动）| official（官方插件管理器兜底）
+  registry: '',      // 自定义安装源；空 = pnpm 自己的配置
+  stage: '',
+  spec: '',
+  resolved: 0,       // 已 resolve 的包数
+  fetched: 0,        // 已下完的包数
+  imported: 0,       // 已落盘的包数
+  packages: 0,       // pnpm 报的 added 总数（解析完才有）
+  part: '',          // 当前正在下的包
+  partSize: 0,
+  partDone: 0,
+  received: 0,       // 真字节（已下完的包的大小之和）
+  total: 0,          // 真字节（已经开始下的包的大小之和）
+  speed: 0,
+  log: [],
+  written: [],
+  checks: [],
+  removed: [],
+  failures: [],
+  detail: '',
+  restartRequired: false,
+  error: '',
+  attempt: null,     // 官方路径才有（第几个安装源）
+  startedAt: 0,
+  updatedAt: 0,
+  run: 0,            // 代际号：取消/重开之后，旧 promise 的结果直接被丢掉
+}
 let drvAbort = null
+let drvChild = null
+
+function drvLog(line) {
+  const text = String(line == null ? '' : line).replace(/[ \t]+$/, '')
+  if (text === '') return
+  const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  drvDl.log.push(stamp + '  ' + text)
+  if (drvDl.log.length > 400) drvDl.log.splice(0, drvDl.log.length - 400)
+  drvDl.updatedAt = Date.now()
+}
+
+function fmtBytes(n) {
+  const v = Number(n) || 0
+  if (v < 1024) return v + ' B'
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB'
+  if (v < 1024 * 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB'
+  return (v / 1024 / 1024 / 1024).toFixed(2) + ' GB'
+}
+
+function drvRunning() {
+  return drvDl.phase === 'resolving' || drvDl.phase === 'fetching' || drvDl.phase === 'importing' ||
+    drvDl.phase === 'applying' || drvDl.phase === 'verifying'
+}
 
 function drvState() {
   const d = driverById(drvDl.id)
@@ -1536,223 +2031,671 @@ function drvState() {
     id: drvDl.id,
     name: d ? d.name : '',
     phase: drvDl.phase,
-    index: drvDl.index,
-    totalParts: drvDl.totalParts,
+    running: drvRunning(),
+    mode: drvDl.mode,
+    registry: drvDl.registry,
+    stage: drvDl.stage,
+    spec: drvDl.spec,
+    resolved: drvDl.resolved,
+    fetched: drvDl.fetched,
+    imported: drvDl.imported,
+    packages: drvDl.packages,
     part: drvDl.part,
+    partSize: drvDl.partSize,
+    partDone: drvDl.partDone,
     received: drvDl.received,
     total: drvDl.total,
     speed: drvDl.speed,
+    // 只有真的知道总量才算百分比；不知道就交给前端显示"已下 X MB（共 Y MB 已公布）"。
+    pct: drvDl.total > 0 ? Math.min(100, Math.round((drvDl.received / drvDl.total) * 100)) : 0,
+    log: drvDl.log.slice(-80),
+    written: drvDl.written,
+    checks: drvDl.checks,
+    removed: drvDl.removed,
+    failures: drvDl.failures,
+    detail: drvDl.detail,
+    restartRequired: drvDl.restartRequired,
     error: drvDl.error,
+    attempt: drvDl.attempt,
+    startedAt: drvDl.startedAt,
     updatedAt: drvDl.updatedAt,
   }
 }
 
 function drvReset(id) {
+  drvDl.run += 1
   drvDl.id = id || ''
   drvDl.phase = 'idle'
+  drvDl.mode = ''
+  drvDl.registry = ''
+  drvDl.stage = ''
+  drvDl.spec = ''
+  drvDl.resolved = 0
+  drvDl.fetched = 0
+  drvDl.imported = 0
+  drvDl.packages = 0
   drvDl.part = ''
-  drvDl.index = 0
-  drvDl.totalParts = 0
+  drvDl.partSize = 0
+  drvDl.partDone = 0
   drvDl.received = 0
   drvDl.total = 0
   drvDl.speed = 0
+  drvDl.log = []
+  drvDl.written = []
+  drvDl.checks = []
+  drvDl.removed = []
+  drvDl.failures = []
+  drvDl.detail = ''
+  drvDl.restartRequired = false
   drvDl.error = ''
+  drvDl.attempt = null
+  drvDl.startedAt = 0
   drvDl.updatedAt = Date.now()
 }
 
-const npmTarballUrl = (name, version) =>
-  NPM_REGISTRY + '/' + name.replace('/', '%2f') + '/-/' + name.split('/').pop() + '-' + version + '.tgz'
+// ---- 安装工具链：内核自带的 node + pnpm ----
+// 官方桌面端在 resources/runtime/primary-runtime/dependencies/ 下自带 node.exe 与 pnpm；
+// 老的 web 外壳把 pnpm 放在 resources/runtime/pnpm/bin/pnpm.mjs，用 bin/node.cmd
+// （ELECTRON_RUN_AS_NODE 的壳）当解释器。两条路都试，都找不到才退到官方插件管理器。
+function driverResourcesDirs() {
+  const dirs = []
+  const push = (p) => { if (p && dirs.indexOf(p) === -1) dirs.push(p) }
+  try {
+    const mods = runtimeModules()
+    if (mods) {
+      const root = dirname(dirname(mods))            // .../app.asar，或内核安装根
+      push(root)
+      if (/[\\/]app\.asar$/i.test(root)) push(dirname(root))
+      push(dirname(root))
+    }
+  } catch (_) {}
+  try {
+    const exe = process.execPath || ''
+    if (exe) { push(join(dirname(exe), 'resources')); push(join(dirname(exe), 'resources', 'runtime')) }
+  } catch (_) {}
+  try { if (process.resourcesPath) push(process.resourcesPath) } catch (_) {}
+  return dirs
+}
 
-function runToolCapture(cmd, args, timeoutMs) {
+function driverToolchain() {
+  const cands = []
+  for (const dir of driverResourcesDirs()) {
+    cands.push({
+      node: join(dir, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', 'node.exe'),
+      pnpm: join(dir, 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.cjs'),
+    })
+    cands.push({
+      node: join(dir, 'primary-runtime', 'dependencies', 'node', 'bin', 'node.exe'),
+      pnpm: join(dir, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.cjs'),
+    })
+    cands.push({ node: join(dir, 'runtime', 'bin', 'node.cmd'), pnpm: join(dir, 'runtime', 'pnpm', 'bin', 'pnpm.cjs') })
+    cands.push({ node: join(dir, 'bin', 'node.cmd'), pnpm: join(dir, 'pnpm', 'bin', 'pnpm.cjs') })
+  }
+  const host = hostRuntimePaths()
+  if (host.pnpm) {
+    if (host.nodeBin) cands.push({ node: join(host.nodeBin, 'node.cmd'), pnpm: host.pnpm })
+    cands.push({ node: '', pnpm: host.pnpm, envNode: true })
+  }
+  for (const c of cands) {
+    try {
+      if (!c.pnpm || !existsSync(c.pnpm)) continue
+      if (c.envNode) return { ...c, label: process.execPath + ' ' + c.pnpm }
+      // `bin/node.cmd` 是个 ELECTRON_RUN_AS_NODE 的壳（内容就是 set + exec %DSH_DESKTOP_NODE_EXECUTABLE%）。
+      // Node 18.20+/20.12+ 起拒绝不带 shell 地 spawn .cmd，所以这里不 spawn 它，
+      // 直接用同样的办法：让 process.execPath 以 node 模式跑 pnpm。
+      if (/\.cmd$/i.test(c.node)) return { ...c, node: '', envNode: true, label: c.node + '（以 node 模式：' + process.execPath + '）' }
+      if (c.node && existsSync(c.node)) return { ...c, label: c.node + ' ' + c.pnpm }
+    } catch (_) {}
+  }
+  return null
+}
+
+/** 改 profile 清单：先备份、再整份写回；mutate 返回 false 表示无需改动。 */
+function updateProfileManifest(mutate) {
+  const file = join(activeProfileDir(), 'package.json')
+  if (!existsSync(file)) throw new Error('找不到 profile 清单：' + file)
+  const before = readFileSync(file, 'utf8')
+  let pkg
+  try { pkg = JSON.parse(before) } catch (_) { throw new Error('profile 清单不是合法 JSON，没敢动它：' + file) }
+  if (mutate(pkg) === false) return { changed: false, file }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const backup = file + '.bak-' + stamp
+  writeFileSync(backup, before, 'utf8')
+  writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
+  return { changed: true, file, backup }
+}
+
+/** 把 bundle 行对齐磁盘现状：包在 → 行在；包没了 → 行摘掉（保命那一步）。 */
+function drvSyncProfile(driver) {
+  const present = !!resolvePackageDir(driver.plugin)
+  const res = updateProfileManifest((pkg) => {
+    pkg.dsh = pkg.dsh || {}
+    pkg.dsh.profile = pkg.dsh.profile || {}
+    const rows = Array.isArray(pkg.dsh.profile.bundles) ? pkg.dsh.profile.bundles.slice() : []
+    const at = rows.indexOf(driver.plugin)
+    if (present && at === -1) { rows.push(driver.plugin); pkg.dsh.profile.bundles = rows; return true }
+    if (!present && at !== -1) { rows.splice(at, 1); pkg.dsh.profile.bundles = rows; return true }
+    return false
+  })
+  return { ...res, bundle: present }
+}
+
+/** 复核安装结果：每条都说清楚"在看哪个东西"。 */
+function drvVerify(driver) {
+  const disk = driverDiskStatus(driver)
+  const checks = [
+    { label: 'provider 目录', ok: disk.present, detail: disk.present ? shortPath(disk.dir) : '不在 node_modules 里' },
+    { label: 'profile 依赖条目', ok: disk.dependency !== undefined,
+      detail: disk.dependency === undefined ? 'profile 的 package.json 没记它（内核不会加载）' : disk.dependency },
+    { label: 'bundle 行（启用）', ok: disk.bundleRow,
+      detail: disk.bundleRow ? 'dsh.profile.bundles 里有它' : '缺 bundle 行 —— 插件页和内核都不会认它' },
+  ]
+  for (const h of disk.heavy) {
+    checks.push({ label: h.name, ok: h.present, detail: h.present ? (h.version || '已安装') : '没下下来' })
+  }
+  return { checks, ok: checks.every((c) => c.ok) }
+}
+
+/** 跑一条 pnpm 命令并把 stdout/stderr 收起来（给删除/收尾这种不需要进度的场景用）。 */
+/**
+ * pnpm 的两种布局都要照顾到：
+ *   · isolated（默认）：入口是 junction，真内容在 `.pnpm/<包>@<版本>/node_modules/<包>`；
+ *     只删入口等于没删 —— 几百 MB 还在 `.pnpm` 里，用户点了删除发现磁盘没变就是这个原因。
+ *   · hoisted（官方 profile 的模板默认）：内容直接平铺在 `node_modules/<包>`，`.pnpm` 里可能
+ *     还留着上一次用另一种 linker 装下的旧副本。
+ * 目录名用的是 **registry 上的包名**，而 alias（`@openai/codex-win32-x64` 其实是
+ * `@openai/codex@0.153.4-win32-x64`）会让名字对不上，所以除了按名字匹配，还要看
+ * `.pnpm/<entry>/node_modules/<我们认识的那个名字>` 在不在。
+ */
+function virtualStoreEntriesFor(name) {
+  const out = []
+  try {
+    const store = join(profileWebModules(), '.pnpm')
+    if (!existsSync(store)) return out
+    const flat = name.replace('/', '+')
+    const seg = name.split('/')
+    for (const e of readdirSync(store, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue
+      if (e.name === flat || e.name.startsWith(flat + '@')) { out.push(join(store, e.name)); continue }
+      try {
+        if (existsSync(join(store, e.name, 'node_modules', ...seg, 'package.json'))) out.push(join(store, e.name))
+      } catch (_) { /* 单个条目读不了就算了 */ }
+    }
+  } catch (_) { /* 没有 .pnpm 或读不了：没有要删的 */ }
+  return out
+}
+
+/** 目录的字节数（递归；读不了的条目按 0 算，不让它挡住删除）。 */
+function packageDirSize(dir) {
+  let total = 0
+  let entries = []
+  try { entries = readdirSync(dir, { withFileTypes: true }) } catch (_) { return 0 }
+  for (const e of entries) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) total += packageDirSize(p)
+    else { try { total += statSync(p).size } catch (_) { /* 跳过读不了的 */ } }
+  }
+  return total
+}
+
+/**
+ * profile 里**无主**的包：清单没写、也没有任何一个"从清单可达"的包依赖它。
+ *
+ * 为什么需要它：provider 被删掉之后，它当初拖进来的传递依赖（`@anthropic-ai/sdk`、
+ * `@modelcontextprotocol/sdk` 以及它们背后那一串 express/hono/ajv/zod…）还留在 node_modules 里，
+ * 谁都不再引用它们 —— 这就是"删了怎么还剩东西"。判定做法是从 profile 清单的依赖出发做可达性
+ * 遍历（顺着 dependencies / optionalDependencies / peerDependencies 走到不动点），不到的就是无主。
+ * 内核自己的 `@deepseek-ai/dsh-*` 与 `.` 开头的 pnpm 管理目录一律不碰。
+ */
+const ORPHAN_SKIP = [/^@deepseek-ai\/dsh-/, /^\./]
+
+function profileOrphans() {
+  const mods = activeProfileModules()
+  const manifest = readProfileManifest()
+  const reachable = new Set()
+  const queue = Object.keys((manifest && manifest.dependencies) || {})
+  while (queue.length > 0) {
+    const name = queue.shift()
+    if (reachable.has(name)) continue
+    reachable.add(name)
+    const at = resolvePackageDir(name)
+    if (!at) continue
+    let pkg = null
+    try { pkg = JSON.parse(readFileSync(join(at, 'package.json'), 'utf8')) } catch (_) { continue }
+    for (const key of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+      for (const dep of Object.keys(pkg[key] || {})) queue.push(dep)
+    }
+  }
+
+  const installed = []
+  let entries = []
+  try { entries = readdirSync(mods, { withFileTypes: true }) } catch (_) { return [] }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue
+    if (e.name.startsWith('@')) {
+      let inner = []
+      try { inner = readdirSync(join(mods, e.name), { withFileTypes: true }) } catch (_) { continue }
+      for (const i of inner) if (i.isDirectory()) installed.push([e.name + '/' + i.name, join(mods, e.name, i.name)])
+      continue
+    }
+    installed.push([e.name, join(mods, e.name)])
+  }
+
+  const out = []
+  for (const [name, dir] of installed) {
+    if (reachable.has(name)) continue
+    if (ORPHAN_SKIP.some((re) => re.test(name))) continue
+    // 只认真正装好的包（有 package.json），免得把用户自己放的东西当垃圾清掉
+    const manifestFile = join(dir, 'package.json')
+    if (!existsSync(manifestFile)) continue
+    let version = ''
+    try { version = String(JSON.parse(readFileSync(manifestFile, 'utf8')).version || '') } catch (_) { version = '' }
+    out.push({ name, version, dir, bytes: packageDirSize(dir) })
+  }
+  out.sort((a, b) => b.bytes - a.bytes)
+  return out
+}
+
+/** 清掉无主依赖（同样是"入口 + .pnpm 里那份"一起删），返回复核报告。 */
+function drvOrphanClean() {
+  const before = profileOrphans()
+  const removed = []
+  const failures = []
+  let bytes = 0
+  for (const o of before) {
+    for (const entry of virtualStoreEntriesFor(o.name)) {
+      if (!existsSync(entry)) continue
+      try { rmSync(entry, { recursive: true, force: true }) } catch (e) { failures.push('删 ' + entry + '：' + (e && e.message ? e.message : String(e))); continue }
+      if (existsSync(entry)) failures.push('删 ' + entry + '：删完还在') ; else removed.push(shortPath(entry))
+    }
+    if (!existsSync(o.dir)) { bytes += o.bytes; continue }
+    try { rmSync(o.dir, { recursive: true, force: true }) } catch (e) { failures.push('删 ' + o.dir + '：' + (e && e.message ? e.message : String(e))); continue }
+    if (existsSync(o.dir)) failures.push('删 ' + o.dir + '：删完还在（可能被占用）')
+    else { removed.push(shortPath(o.dir)); bytes += o.bytes }
+  }
+  const after = profileOrphans()
+  return {
+    removed,
+    failures,
+    bytes,
+    remaining: after.map((o) => o.name + (o.version ? ' ' + o.version : '')),
+    ok: after.length === 0 && failures.length === 0,
+    note: 'pnpm 全局缓存里还留着一份（想清可跑 pnpm store prune）。',
+  }
+}
+
+function runPnpmQuiet(tool, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    const env = { ...process.env, CI: '1', NO_COLOR: '1' }
+    if (tool.envNode || !tool.node) env.ELECTRON_RUN_AS_NODE = '1'
+    const bin = tool.envNode || !tool.node ? process.execPath : tool.node
+    const p = spawn(bin, [tool.pnpm, ...args], { windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
-    let err = ''
-    const timer = setTimeout(() => { try { p.kill() } catch (_) {} ; reject(new Error(cmd + ' 超时')) }, timeoutMs || 300000)
+    const timer = setTimeout(() => {
+      try { p.kill() } catch (_) {}
+      reject(new Error('pnpm 超时（' + Math.round((timeoutMs || 300000) / 1000) + 's）'))
+    }, timeoutMs || 300000)
     p.stdout.on('data', (b) => { out += String(b) })
-    p.stderr.on('data', (b) => { err += String(b) })
+    p.stderr.on('data', (b) => { out += String(b) })
     p.on('error', (e) => { clearTimeout(timer); reject(e) })
     p.on('close', (code) => {
       clearTimeout(timer)
-      if (code === 0) resolve({ out, err })
-      else reject(new Error(cmd + ' 退出码 ' + code + (err ? '：' + err.trim().slice(0, 300) : '')))
+      if (code === 0) resolve({ out })
+      else reject(Object.assign(new Error('pnpm 退出码 ' + code), { detail: out.slice(-2000) }))
     })
   })
 }
 
 /**
- * 解 tgz。npm 包就是 tar.gz，Windows 10+ 自带 bsdtar —— 比起自己写一个 tar 解析器，
- * 用它更不容易出错（长路径、符号链接它都处理）。
+ * 我们自己装：内核自带的 node + pnpm，用 `--reporter=ndjson` 的事件流当进度。
+ *
+ * 为什么不用官方 pluginManager.installBundle：它把 pnpm 整段黑箱跑完才回话，进度只能靠猜，
+ * 而且有"pnpm 静默 10 分钟就杀"的 idle 超时 —— 超时后清单被回滚、文件却已经落盘，于是留下
+ * "残留 / 删除删不掉 / 点了清理反而显示已安装"。这里我们自己读事件：进度是真的（哪个包、多少字节），
+ * 取消是真的（杀整棵进程树），失败有可复制的原始输出。
  */
-async function extractTarball(tgz, dest) {
-  mkdirSync(dest, { recursive: true })
-  const tarExe = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
-  const tool = existsSync(tarExe) ? tarExe : 'tar'
-  await runToolCapture(tool, ['-xzf', tgz, '-C', dest], 300000)
-  return join(dest, 'package')
-}
-
-function copyTree(from, to) {
-  mkdirSync(to, { recursive: true })
-  for (const e of readdirSync(from, { withFileTypes: true })) {
-    const s = join(from, e.name)
-    const d = join(to, e.name)
-    if (e.isDirectory()) copyTree(s, d)
-    else { try { renameSync(s, d) } catch (_) { writeFileSync(d, readFileSync(s)) } }
-  }
-}
-
-async function drvDownloadOne(driver, pkg, tmpRoot) {
-  const registryName = pkg.registry || pkg.installAs
-  const url = npmTarballUrl(registryName, pkg.version)
-  const tgz = join(tmpRoot, pkg.installAs.replace('/', '__') + '-' + pkg.version + '.tgz')
-  drvAbort = new AbortController()
-  const res = await fetch(url, { redirect: 'follow', signal: drvAbort.signal })
-  if (!res.ok) throw new Error(pkg.installAs + ' 下载失败 HTTP ' + res.status)
-  if (!res.body) throw new Error(pkg.installAs + ' 响应为空')
-  drvDl.total = Number(res.headers.get('content-length')) || pkg.approx || 0
-  const file = createWriteStream(tgz)
-  let streamErr = null
-  file.on('error', (e) => { streamErr = e })
-  let received = 0
+async function drvOwnInstall(driver, spec, registry, run) {
+  const tool = driverToolchain()
+  if (!tool) throw new Error('找不到内核自带的 pnpm / node')
+  const profile = activeProfileDir()
+  const args = [tool.pnpm, 'add', spec, '--dir', profile, '--reporter=ndjson', '--config.minimumReleaseAge=0']
+  // 最小发布年龄（默认 24 小时）会把"刚发布的版本"直接拒掉。我们自己装的时候关掉它，
+  // 免得用户看到版本就在那儿却装不上；官方那条路仍然受它管。
+  if (registry) args.push('--registry', registry)
+  drvLog('工具链：' + tool.label)
+  drvLog('$ pnpm add ' + spec + ' --dir "' + profile + '"' + (registry ? ' --registry ' + registry : ''))
+  const env = { ...process.env, CI: '1', NO_COLOR: '1' }
+  if (tool.envNode || !tool.node) env.ELECTRON_RUN_AS_NODE = '1'
+  const bin = tool.envNode || !tool.node ? process.execPath : tool.node
+  const child = spawn(bin, args, { windowsHide: true, cwd: profile, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  drvChild = child
+  const sizes = new Map()
+  const tail = []
+  let bytes = 0
   const t0 = Date.now()
-  for await (const chunk of Readable.fromWeb(res.body)) {
-    if (streamErr) throw streamErr
-    received += chunk.length
-    drvDl.received = received
+  const onLine = (raw) => {
+    const line = String(raw).replace(/\r$/, '')
+    if (line.trim() === '') return
+    tail.push(line)
+    if (tail.length > 400) tail.shift()
+    if (run !== drvDl.run) return
+    const text = line.trim()
+    let ev = null
+    if (text.startsWith('{')) { try { ev = JSON.parse(text) } catch (_) { ev = null } }
+    if (!ev || typeof ev.name !== 'string') { drvLog(text); return }
+    if (ev.name === 'pnpm:stage') {
+      if (ev.stage === 'resolution_started') { drvDl.stage = 'resolving'; drvLog('解析依赖…') }
+      else if (ev.stage === 'resolution_done') { drvDl.stage = 'fetching'; drvLog('依赖解析完：' + drvDl.resolved + ' 个包') }
+      else if (ev.stage === 'importing_started' || ev.stage === 'importing_done') drvDl.stage = 'importing'
+    } else if (ev.name === 'pnpm:progress') {
+      if (ev.status === 'resolved') {
+        drvDl.resolved += 1
+        drvDl.phase = 'resolving'
+        drvDl.stage = 'resolving'
+      } else if (ev.status === 'fetched') {
+        const size = sizes.get(ev.packageId) || 0
+        bytes += size
+        drvDl.received = bytes
+        drvDl.fetched += 1
+        drvDl.partDone = size
+        const secs = (Date.now() - t0) / 1000
+        if (secs > 0.5) drvDl.speed = Math.round(bytes / secs)
+      } else if (ev.status === 'imported') {
+        drvDl.imported += 1
+      }
+    } else if (ev.name === 'pnpm:fetching-progress') {
+      if (ev.status === 'started') {
+        const size = Number(ev.size) || 0
+        sizes.set(ev.packageId, size)
+        drvDl.total += size
+        drvDl.part = ev.packageId
+        drvDl.partSize = size
+        drvDl.partDone = 0
+        drvDl.phase = 'fetching'
+        drvDl.stage = 'fetching'
+        if (Number(ev.attempt) > 1) drvLog('重试 ' + ev.packageId + '（第 ' + ev.attempt + ' 次）')
+      }
+    } else if (ev.name === 'pnpm:stats') {
+      if (Number(ev.added) > 0) drvDl.packages = Number(ev.added)
+    } else if (ev.name === 'pnpm:request-retry') {
+      drvLog('网络重试 ' + (ev.packageId || '') + '（第 ' + ev.attempt + ' 次）')
+    }
     drvDl.updatedAt = Date.now()
-    const secs = (drvDl.updatedAt - t0) / 1000
-    if (secs > 0.3) drvDl.speed = Math.round(received / secs)
-    if (!file.write(chunk)) await once(file, 'drain')
   }
-  await new Promise((resolve, reject) => file.end((err) => (err ? reject(err) : resolve())))
-  if (streamErr) throw streamErr
-  if (fileSize(tgz) < 1024) throw new Error(pkg.installAs + ' 下载文件异常')
-
-  // 解到临时目录，再把 package/ 里的内容搬到 profile 的 node_modules 里，
-  // 中途失败不会留下半个包（最后一步是 rename，原子）。
-  const unpack = join(tmpRoot, 'x-' + pkg.installAs.replace('/', '__'))
-  rmSync(unpack, { recursive: true, force: true })
-  const inner = await extractTarball(tgz, unpack)
-  const target = join(profileWebModules(), ...pkg.installAs.split('/'))
-  rmSync(target, { recursive: true, force: true })
-  mkdirSync(join(target, '..'), { recursive: true })
-  copyTree(inner, target)
-  rmSync(unpack, { recursive: true, force: true })
-  rmSync(tgz, { force: true })
-  return target
-}
-
-async function drvInstall(id) {
-  const driver = driverById(id)
-  if (!driver) throw new Error('不认识的驱动：' + id)
-  const tmpRoot = join(petDownloadDir(), 'drivers')
-  rmSync(tmpRoot, { recursive: true, force: true })
-  mkdirSync(tmpRoot, { recursive: true })
-  drvDl.index = 0
-  drvDl.totalParts = driver.packages.length
-  for (let i = 0; i < driver.packages.length; i++) {
-    const pkg = driver.packages[i]
-    drvDl.index = i + 1
-    drvDl.part = pkg.installAs
-    drvDl.received = 0
-    drvDl.total = pkg.approx || 0
-    drvDl.updatedAt = Date.now()
-    await drvDownloadOne(driver, pkg, tmpRoot)
+  const rl = createInterface({ input: child.stdout })
+  rl.on('line', onLine)
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (buf) => { for (const l of String(buf).split('\n')) onLine(l) })
+  const code = await new Promise((resolve) => child.on('close', (c) => resolve(c)))
+  try { rl.close() } catch (_) {}
+  drvChild = null
+  if (run !== drvDl.run) throw Object.assign(new Error('已取消'), { name: 'AbortError' })
+  if (code !== 0) {
+    throw Object.assign(new Error('pnpm 退出码 ' + code + '，安装没完成（原始输出在日志里）'),
+      { detail: tail.slice(-60).join('\n') })
   }
-  rmSync(tmpRoot, { recursive: true, force: true })
-  drvDl.part = ''
+  drvLog('落盘完成：下完 ' + drvDl.fetched + ' 个包 · ' + fmtBytes(drvDl.received))
+  drvDl.stage = 'applying'
+  drvDl.written = []
+  const row = drvSyncProfile(driver)
+  const diskNow = driverDiskStatus(driver)
+  drvDl.written.push('依赖条目：' + driver.plugin + ' → ' + (diskNow.dependency === undefined ? '（没写上）' : diskNow.dependency))
+  drvDl.written.push('bundle 行：' + (row.bundle ? '已写入 dsh.profile.bundles' : '没写上'))
+  drvLog(row.changed ? '写入 bundle 行' + (row.backup ? '（备份 ' + row.backup + '）' : '') : 'bundle 行已存在，没动')
+  drvDl.stage = 'verifying'
+  const verified = drvVerify(driver)
+  drvDl.checks = verified.checks
+  const bad = verified.checks.filter((c) => !c.ok)
+  if (bad.length) drvLog('复核没通过：' + bad.map((c) => c.label).join('、'))
   drvDl.phase = 'done'
   drvDl.speed = 0
+  drvDl.restartRequired = true
+  drvDl.detail = bad.length === 0
+    ? '装好了。重启 dsh 之后，agent 预设里那一行（' + driver.row + '）就能启用'
+    : '文件已落地，但复核有 ' + bad.length + ' 项没过（见下方复核结果）'
   drvDl.updatedAt = Date.now()
-  try { drvSyncProfile(driver) } catch (_) {}
 }
 
-function drvInstallStart(id) {
+/** 官方插件管理器兜底：只有找不到 pnpm 时才走这里。 */
+async function drvOfficialInstall(driver, ctx, spec, run) {
+  const pm = officialPluginManager(ctx)
+  if (!pm) throw new Error('这台机器上既没有内核自带的 pnpm，也没有官方插件管理器，装不了')
+  drvLog('用官方插件管理器安装 ' + spec)
+  drvDl.stage = 'installing'
+  const requestId = 'ds-zhuzhu-' + driver.id + '-' + Date.now()
+  let result = null
+  try {
+    result = await pm.installBundle(spec, { requestId })
+  } catch (error) {
+    if (run !== drvDl.run) throw Object.assign(new Error('已取消'), { name: 'AbortError' })
+    // 官方管理器可能被它自己的 idle 超时杀掉（"pnpm printed nothing for 600000ms"）。
+    // 这时候包往往已经落地 —— 查磁盘，齐了就当成功，只是提示重启。
+    if (!driverDiskStatus(driver).installed) throw error
+    drvLog('官方安装器收尾超时（pnpm 静默被终止），但磁盘上已经齐了，按成功处理')
+  }
+  if (run !== drvDl.run) throw Object.assign(new Error('已取消'), { name: 'AbortError' })
+  if (result) {
+    const application = result.application
+    if (application === 'cancelled') throw Object.assign(new Error('安装已取消'), { name: 'AbortError' })
+    if (application === 'failed' || result.error) {
+      const detail = result.error && (result.error.message || result.error.detail || result.error)
+      const reason = explainOfficialError(result, detail ? (typeof detail === 'string' ? detail : JSON.stringify(detail)) : spec)
+      throw new Error('官方安装失败：' + reason)
+    }
+    drvDl.restartRequired = application === 'restart-required'
+  }
+  drvDl.stage = 'applying'
+  drvDl.written = []
+  const row = drvSyncProfile(driver)
+  const diskNow = driverDiskStatus(driver)
+  drvDl.written.push('依赖条目：' + driver.plugin + ' → ' + (diskNow.dependency === undefined ? '（没写上）' : diskNow.dependency))
+  drvDl.written.push('bundle 行：' + (row.bundle ? '已写入 dsh.profile.bundles' : '没写上'))
+  drvDl.stage = 'verifying'
+  const verified = drvVerify(driver)
+  drvDl.checks = verified.checks
+  const bad = verified.checks.filter((c) => !c.ok)
+  if (bad.length) drvLog('复核没通过：' + bad.map((c) => c.label).join('、'))
+  drvDl.phase = 'done'
+  drvDl.speed = 0
+  drvDl.restartRequired = true
+  drvDl.detail = bad.length === 0
+    ? '装好了（官方安装器）。重启 dsh 之后，agent 预设里那一行（' + driver.row + '）就能启用'
+    : '文件已落地，但复核有 ' + bad.length + ' 项没过（见下方复核结果）'
+  drvDl.updatedAt = Date.now()
+}
+
+function drvInstallStart(id, ctx, version, registry) {
   const driver = driverById(id)
   if (!driver) throw new Error('不认识的驱动：' + id)
-  if (drvDl.phase === 'downloading') throw new Error('正在装另一个驱动，先等它结束')
+  if (drvRunning()) throw new Error('正在装另一个驱动，先等它结束')
   drvReset(driver.id)
-  drvDl.phase = 'downloading'
+  // 按内核版本装：provider 是跟内核一起发的一串版本，npm 的 latest 是远古的 0.0.1-rc.1。
+  const wanted = String(version || kernelRuntimeVersion() || '')
+  drvDl.spec = wanted ? driver.plugin + '@' + wanted : driver.plugin
+  drvDl.registry = String(registry || '')
+  drvDl.mode = driverToolchain() ? 'own' : (officialPluginManager(ctx) ? 'official' : '')
+  if (drvDl.mode === '') {
+    drvDl.phase = 'error'
+    drvDl.error = '这台机器上既没有内核自带的 pnpm，也没有官方插件管理器，装不了'
+    drvLog(drvDl.error)
+    return drvState()
+  }
+  drvDl.phase = 'resolving'
+  drvDl.stage = 'resolving'
+  drvDl.attempt = null
+  drvDl.startedAt = Date.now()
   drvDl.updatedAt = Date.now()
-  drvInstall(driver.id).catch((e) => {
-    if (e && e.name === 'AbortError') drvReset(driver.id)
-    else {
-      drvDl.phase = 'error'
-      drvDl.error = e && e.message ? e.message : String(e)
-      drvDl.speed = 0
-      drvDl.updatedAt = Date.now()
-    }
-  }).finally(() => { drvAbort = null })
+  drvLog('开始安装 ' + drvDl.spec + (drvDl.registry ? '（源 ' + drvDl.registry + '）' : ''))
+  const run = drvDl.run
+  const task = drvDl.mode === 'own'
+    ? drvOwnInstall(driver, drvDl.spec, drvDl.registry, run)
+    : drvOfficialInstall(driver, ctx, drvDl.spec, run)
+  task.catch((e) => {
+    if (run !== drvDl.run) return                       // 已被取消 / 重开：旧 promise 的话不算数
+    if (e && e.name === 'AbortError') { drvReset(driver.id); return }
+    drvDl.phase = 'error'
+    drvDl.error = e && e.message ? e.message : String(e)
+    if (e && e.detail) drvLog(String(e.detail).split('\n').slice(-30).join('\n'))
+    drvDl.speed = 0
+    drvDl.updatedAt = Date.now()
+  }).finally(() => {
+    if (run === drvDl.run) { drvAbort = null; drvChild = null }
+  })
   return drvState()
 }
 
 function drvCancel() {
-  if (drvDl.phase !== 'downloading') throw new Error('当前没有正在进行的下载')
-  try { if (drvAbort) drvAbort.abort() } catch (_) {}
+  if (!drvRunning()) throw new Error('当前没有正在进行的安装')
   const id = drvDl.id
+  const child = drvChild
+  try { if (drvAbort) drvAbort.abort() } catch (_) {}
+  if (child && child.pid) {
+    // Windows 上只 kill 父进程会留下 pnpm 的子进程，得把整棵树带走。
+    try {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      } else child.kill('SIGKILL')
+    } catch (_) {}
+  }
+  drvChild = null
   drvReset(id)
   return drvState()
 }
 
-function drvRemove(id) {
+/**
+ * 删除：**无条件执行**，不依赖任何清单说"我装过"。
+ *   1) 先摘我们自己写的 bundle 行（失败不阻断后续）；
+ *   2) 官方清单里如果也认它，让官方也卸一次（失败不阻断）；
+ *   3) pnpm remove，把依赖条目和 lockfile 一起收干净（失败不阻断）；
+ *   4) 直接删目录：provider + 登记的重包 —— 这一步不看清单，删掉才算数；
+ *   5) 目录没了而清单还留着依赖条目，就把条目也摘掉（行与包必须一致）；
+ *   最后复核，如实报出"删了什么 / 还剩什么 / 哪一步失败" —— 不假报成功。
+ */
+async function drvRemove(id, ctx) {
   const driver = driverById(id)
   if (!driver) throw new Error('不认识的驱动：' + id)
-  if (drvDl.id === driver.id && drvDl.phase === 'downloading') drvCancel()
+  if (drvRunning() && drvDl.id === driver.id) { try { drvCancel() } catch (_) {} }
   const removed = []
-  for (const pkg of driver.packages) {
-    // 只删装在我们自己目录里的那份；runtime 里如果自带（老版本），那是内核的东西，不动。
-    const p = join(profileWebModules(), ...pkg.installAs.split('/'))
-    if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); removed.push(pkg.installAs) }
-  }
-  try { drvSyncProfile(driver) } catch (_) {}
-  return { id: driver.id, removed }
-}
+  const failures = []
+  const before = driverDiskStatus(driver)
 
-/**
- * 驱动装好/删掉之后，把 profile 的 bundle 行对齐：
- *   · 装了  -> 把插件包放进 profile 的 node_modules（真目录；和用户现在那份一样），
- *             并把 bundle 行加回去 —— provider 由这个插件注册，没有它就没人认识 codex/claude；
- *   · 删了  -> 把 bundle 行摘掉。**这一步是保命的**：行还在、依赖没了，
- *             Cordis 加载插件会失败，那种失败会把整个 profile 拖下水
- *             （0.8.0 那次 dsh-pet 就是这么把人挡在门外的）。
- */
-function drvSyncProfile(driver) {
-  const manifestPath = petsManifestPath()
-  if (!existsSync(manifestPath)) return { synced: false, reason: 'no-profile' }
-  let pkg = null
-  try { pkg = JSON.parse(readFileSync(manifestPath, 'utf8')) } catch (_) { return { synced: false, reason: 'bad-manifest' } }
-  pkg.dsh = pkg.dsh || {}
-  pkg.dsh.profile = pkg.dsh.profile || {}
-  const bundles = Array.isArray(pkg.dsh.profile.bundles) ? pkg.dsh.profile.bundles : []
-  const name = driver.plugin
-  const want = driverInstalled(driver)
-  const idx = bundles.indexOf(name)
-  let changed = false
+  // 1) bundle 行
+  try {
+    const res = updateProfileManifest((pkg) => {
+      pkg.dsh = pkg.dsh || {}
+      pkg.dsh.profile = pkg.dsh.profile || {}
+      const rows = Array.isArray(pkg.dsh.profile.bundles) ? pkg.dsh.profile.bundles.slice() : []
+      const at = rows.indexOf(driver.plugin)
+      if (at === -1) return false
+      rows.splice(at, 1)
+      pkg.dsh.profile.bundles = rows
+      return true
+    })
+    if (res.changed) removed.push('bundle 行（' + driver.plugin + '）')
+  } catch (e) { failures.push('摘 bundle 行：' + (e && e.message ? e.message : String(e))) }
 
-  if (want) {
-    // 插件本体从 runtime 复制到 profile（runtime 里那份是内核自带的，不能被 pnpm 动）
-    const src = join(runtimeModules(), ...name.split('/'))
-    const dst = join(profileWebModules(), ...name.split('/'))
-    if (existsSync(src) && !existsSync(dst)) {
-      try { copyTree(src, dst) } catch (e) { return { synced: false, reason: 'copy-failed: ' + (e && e.message) } }
-    }
-    if (idx === -1) {
-      bundles.push(name)
-      pkg.dependencies = pkg.dependencies || {}
-      pkg.dependencies[name] = 'file:' + dst.replace(/\\/g, '/')
-      changed = true
-    }
-  } else if (idx !== -1) {
-    bundles.splice(idx, 1)
-    if (pkg.dependencies && Object.prototype.hasOwnProperty.call(pkg.dependencies, name)) delete pkg.dependencies[name]
-    changed = true
+  // 2) 官方侧
+  const pm = officialPluginManager(ctx)
+  if (pm) {
+    try {
+      const official = await officialBundles(ctx)
+      const row = official.bundles.find((b) => b.name === driver.plugin)
+      if (row && row.installed) {
+        const result = await pm.removeBundle(driver.plugin)
+        const application = result && result.application
+        if (application === 'failed' || (result && result.error)) {
+          failures.push('官方卸载：' + explainOfficialError(result, driver.plugin))
+        } else removed.push('官方 bundle（' + driver.plugin + '）')
+      }
+    } catch (e) { failures.push('官方卸载：' + explainOfficialError({ error: e }, String((e && e.message) || e))) }
   }
-  if (changed) {
-    pkg.dsh.profile.bundles = bundles
-    writeFileSync(manifestPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
+
+  // 3) pnpm remove（把依赖条目和 lockfile 一并收干净）。
+  // 清单里本来就没这个依赖时 pnpm 会以 ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS 退出 —— 那不是失败，
+  // 跳过就是了（半装的残留正是这个状态：文件在磁盘上、清单里没条目）。
+  const notes = []
+  const tool = driverToolchain()
+  const declared = profileDependency(driver.plugin) !== undefined
+  if (tool && declared) {
+    try {
+      await runPnpmQuiet(tool, ['remove', driver.plugin, '--dir', activeProfileDir()], 180000)
+      removed.push('pnpm remove ' + driver.plugin)
+    } catch (e) {
+      const detail = String((e && (e.detail || e.message)) || e)
+      if (/CANNOT_REMOVE_MISSING_DEPS/.test(detail)) notes.push('清单里没有这个依赖，pnpm remove 跳过（本来也没得删）')
+      else failures.push('pnpm remove：' + (e && e.message ? e.message : String(e)))
+    }
+  } else if (!declared) {
+    notes.push('清单里没有这个依赖，pnpm remove 跳过（本来也没得删）')
   }
-  return { synced: true, bundle: want, changed }
+
+  // 4) 直接删目录（provider + 重包）。**只动当前 profile** —— `~/.dsh/profiles/node_modules`
+  // 是所有 profile 共用的兜底目录，从桌面端把它删掉会把 web 那个 profile 一起弄坏，
+  // 所以那边只报告、不删。
+  const names = [driver.plugin, ...driver.heavy]
+  const elsewhere = []
+  const storeEntries = []
+  for (const name of names) {
+    for (const entry of virtualStoreEntriesFor(name)) {
+      if (storeEntries.indexOf(entry) === -1) storeEntries.push(entry)
+    }
+    const here = join(profileWebModules(), ...name.split('/'))
+    if (existsSync(here)) {
+      try { rmSync(here, { recursive: true, force: true }) }
+      catch (e) { failures.push('删 ' + here + '：' + (e && e.message ? e.message : String(e))) }
+      if (existsSync(here)) failures.push('删 ' + here + '：删完还在（可能被占用）')
+      else removed.push(shortPath(here))
+    }
+    const shared = join(profileRootModules(), ...name.split('/'))
+    if (existsSync(shared)) elsewhere.push(shared + '（别的 profile 共用，没动）')
+  }
+  // 4b) 入口删掉之后，把 `.pnpm` 里真正装内容的那几条也删掉 —— 不然磁盘一点没释放。
+  for (const entry of storeEntries) {
+    if (!existsSync(entry)) continue
+    try { rmSync(entry, { recursive: true, force: true }) }
+    catch (e) { failures.push('删 ' + entry + '：' + (e && e.message ? e.message : String(e))); continue }
+    if (existsSync(entry)) failures.push('删 ' + entry + '：删完还在（可能被占用）')
+    else removed.push(shortPath(entry))
+  }
+
+  // 5) 条目与目录必须一致
+  try {
+    const diskNow = driverDiskStatus(driver)
+    if (!diskNow.present && diskNow.dependency !== undefined) {
+      const res = updateProfileManifest((pkg) => {
+        if (!pkg.dependencies || !Object.prototype.hasOwnProperty.call(pkg.dependencies, driver.plugin)) return false
+        delete pkg.dependencies[driver.plugin]
+        return true
+      })
+      if (res.changed) removed.push('依赖条目（' + driver.plugin + '）')
+    }
+  } catch (e) { failures.push('摘依赖条目：' + (e && e.message ? e.message : String(e))) }
+
+  const after = driverDiskStatus(driver)
+  const remaining = []
+  if (after.present) remaining.push('provider 目录 ' + after.dir)
+  if (after.dependency !== undefined) remaining.push('依赖条目 ' + after.dependency)
+  if (after.bundleRow) remaining.push('bundle 行')
+  for (const h of after.heavy) if (h.present) remaining.push(h.name + (h.version ? ' ' + h.version : ''))
+  const result = {
+    id: driver.id,
+    removed,
+    failures,
+    remaining,
+    notes,
+    // 别处还有副本（没动过），以及 pnpm 的全局缓存 —— 都如实说出来，省得用户以为"删了没效果"。
+    elsewhere,
+    note: 'pnpm 全局缓存里还留着一份（想清可跑 pnpm store prune）。',
+    ok: remaining.length === 0,
+    before: { dir: before.dir, dependency: before.dependency === undefined ? '' : before.dependency, bundleRow: before.bundleRow },
+    after: { dir: after.dir, dependency: after.dependency === undefined ? '' : after.dependency, bundleRow: after.bundleRow },
+  }
+  drvDl.removed = removed
+  drvDl.failures = failures
+  drvLog('删除 ' + driver.name + '：删掉 ' + removed.length + ' 项' +
+    (failures.length ? '，' + failures.length + ' 步失败' : '') +
+    (remaining.length ? '；还有残留：' + remaining.join('、') : '；复核干净'))
+  return result
 }
 
 // ---- agent 预设维护 ----
@@ -1818,7 +2761,7 @@ function presetRowInfo(text, row) {
 }
 
 function presetReport() {
-  const drivers = driverReport()
+  const drivers = driverDiskReport()
   return presetFiles().map((p) => {
     let text = ''
     let error = ''
@@ -1858,7 +2801,7 @@ function presetReport() {
  * 从后往前改，行号不会错位。
  */
 function applyPresetFix(text) {
-  const drivers = driverReport()
+  const drivers = driverDiskReport()
   const edits = []
   for (const row of presetRows(text)) {
     const info = presetRowInfo(text, row)
@@ -2645,6 +3588,16 @@ function explainText() {
 export function apply(ctx, config = {}) {
   ctx.effect(() => {
     petEnsureTimer(ctx)
+    // 官方安装器的阶段事件（我们只在 requestId 对得上时采用，别的安装与我们无关）。
+    const offInstallState = ctx.on
+      ? ctx.on('plugin-manager/install-state', (progress) => {
+        if (!progress || progress.requestId !== drvDl.requestId) return
+        drvDl.stage = progress.phase
+        drvDl.attempt = progress.attempt || null
+        drvDl.updatedAt = Date.now()
+      })
+      : undefined
+    if (typeof offInstallState === 'function') ctx.effect(() => offInstallState)
     // 官方更新会把 app.asar 换回原样 → 这里每次启动都补一遍（已补过就是一次 stat，几乎无成本）。
     asarPatchStatus = ensurePersistentBrowserProfile()
     const disposers = [
@@ -2721,16 +3674,45 @@ export function apply(ctx, config = {}) {
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/pets/uninstall', (body) =>
         ({ ok: true, data: petUninstall(String((body && body.id) || '')) }))),
       // 子代理可选驱动 + agent 预设维护（设置里“agent 预设”旁边那一块）
-      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/drivers', () => ({
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/drivers', () => driverReport(ctx).then((items) => ({
         ok: true,
-        data: { items: driverReport(), state: drvState() },
-      }))),
+        data: { items, state: drvState() },
+      })))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/drivers/state', () => ({ ok: true, data: drvState() }))),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/drivers/install', (body) =>
-        ({ ok: true, data: drvInstallStart(String((body && body.id) || '')) }))),
+        ({ ok: true, data: drvInstallStart(String((body && body.id) || ''), ctx,
+          body && body.version ? String(body.version) : '',
+          body && body.registry ? String(body.registry) : '') }))),
+      // 可选版本列表（下拉用）：provider 是一串按内核版本发的包，默认选与内核同版本的那版。
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/drivers/versions/codex', async () => {
+        const driver = driverById('codex')
+        const info = await npmVersions(driver.plugin)
+        return { ok: true, data: { package: driver.plugin, kernel: kernelRuntimeVersion(), ...info } }
+      })),
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/drivers/versions/claude', async () => {
+        const driver = driverById('claude')
+        const info = await npmVersions(driver.plugin)
+        return { ok: true, data: { package: driver.plugin, kernel: kernelRuntimeVersion(), ...info } }
+      })),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/drivers/cancel', () => ({ ok: true, data: drvCancel() }))),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/drivers/remove', (body) =>
-        ({ ok: true, data: drvRemove(String((body && body.id) || '')) }))),
+        drvRemove(String((body && body.id) || ''), ctx).then((data) => ({ ok: true, data })))),
+      // 无主依赖（provider 删掉之后留下的传递依赖）：先列出来给人看，点了才删。
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/drivers/orphans', () => ({
+        ok: true, data: { items: profileOrphans() },
+      }))),
+      ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/drivers/orphans/clean', () =>
+        ({ ok: true, data: drvOrphanClean() }))),
+      // 插件更新（官方插件页只给装/停/删，没有更新入口）
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/plugins', () =>
+        pluginInventory(ctx, false).then((data) => ({ ok: true, data })))),
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/plugins/check', () =>
+        pluginInventory(ctx, true).then((data) => ({ ok: true, data })))),
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/plugins/state', () => ({ ok: true, data: plugState() }))),
+      ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/plugins/update', (body) =>
+        ({ ok: true, data: pluginUpdateStart(String((body && body.name) || ''), ctx) }))),
+      ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/plugins/update-all', () =>
+        pluginUpdateAll(ctx).then((data) => ({ ok: true, data })))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/presets', () => ({ ok: true, data: presetReport() }))),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/presets/fix', (body) =>
         ({ ok: true, data: presetFix(String((body && body.id) || '')) }))),
