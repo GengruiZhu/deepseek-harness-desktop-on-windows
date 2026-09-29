@@ -47,7 +47,23 @@ ds_zhuzhu_use/
 
 ## 安装
 
-**方式一：npm 包（推荐）**
+### 用法一：官方安装器（推荐）
+
+官方桌面版 → **插件** 页 →「添加插件」。安装器接受 **包名 / Git 仓库地址 / 本地目录 / `.tgz`** 四类来源。
+**本插件目前没有发布到 npm 官方源**（`npm view ds_zhuzhu_use` 为 404），所以填「包名」会报
+*未找到相关插件*；请用下面三种之一：
+
+| 填法 | 填什么 |
+| --- | --- |
+| **`.tgz` 直链**（最省事） | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/ds_zhuzhu_use-0.2.0.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录那个 `ds_zhuzhu_use-0.2.0.tgz` 的**绝对路径** |
+| **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `ds_zhuzhu_use/` 源码目录 |
+
+> - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
+> - 安装器会先校验 `dsh.bundle`（本插件有）；装完状态是「已安装但未启用」，点**立即启用**或下次启动生效。
+> - `.tgz` 直链不经过 npm 源，需要本机能直接访问 GitHub（官方文案同样说明这一点）。
+
+### 用法二：本地 tgz + npm install
 
 本分支根目录的 `ds_zhuzhu_use-0.2.0.tgz` 就是 `npm pack` 产物（8 个文件，约 103 KB）：
 
@@ -57,7 +73,7 @@ npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # 装进当前 profile 的 node
 #   dsh plugin --profile desktop add .\ds_zhuzhu_use-0.2.0.tgz
 ```
 
-**方式二：源码目录**
+### 用法三：源码目录
 
 1. 取本分支的 `ds_zhuzhu_use/` 目录
 2. 放进目标 profile 的 `node_modules/`：
@@ -114,7 +130,19 @@ Official `dsh`-format **first-party plugin**, published on the `plugin-assets` b
 
 **Install.**
 
-**Option 1 — packed tarball (recommended).** `ds_zhuzhu_use-0.2.0.tgz` at the branch root is the `npm pack` output (8 files, ~103 KB):
+**Way 1 — official plugin manager (recommended).** Official desktop → **Plugins** page → "Add plugin". The installer accepts a package name, a Git repository address, a local directory, or a `.tgz`. **This plugin is not published to the npm registry** (`npm view ds_zhuzhu_use` → 404), so a bare package name reports *No such plugin was found*; use one of these instead:
+
+| Input | What to enter |
+| --- | --- |
+| **`.tgz` URL** (easiest) | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/ds_zhuzhu_use-0.2.0.tgz` |
+| **Local `.tgz` file** | absolute path to `ds_zhuzhu_use-0.2.0.tgz` at the branch root |
+| **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `ds_zhuzhu_use/` source directory |
+
+> - A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*.
+> - The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
+> - A `.tgz` URL is not fetched through the registry, so this machine must reach GitHub directly (as the official hint also states).
+
+**Way 2 — local tarball + npm install.** `ds_zhuzhu_use-0.2.0.tgz` at the branch root is the `npm pack` output (8 files, ~103 KB):
 
 ```powershell
 npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # installs into the current profile's node_modules
@@ -122,7 +150,7 @@ npm install ".\ds_zhuzhu_use-0.2.0.tgz"          # installs into the current pro
 #   dsh plugin --profile desktop add .\ds_zhuzhu_use-0.2.0.tgz
 ```
 
-**Option 2 — source directory.**
+**Way 3 — source directory.**
 
 1. Take the `ds_zhuzhu_use/` directory from this branch
 2. Drop it into the target profile's `node_modules/`:
