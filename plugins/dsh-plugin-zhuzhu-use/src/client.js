@@ -1,9 +1,9 @@
 /**
- * ds_zhuzhu_use client — 峰谷徽章 + 软件信息 / 桌面插件 / 工作目录 / 会话版本 / 宠物设置页。
+ * dsh-plugin-zhuzhu-use client — 峰谷徽章 + 软件信息 / 桌面插件 / 工作目录 / 会话版本 / 宠物设置页。
  */
 (function () {
 window.__ModuleLoader__.load({
-	id: "ds_zhuzhu_use",
+	id: "dsh-plugin-zhuzhu-use",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -3502,7 +3502,7 @@ function PetsSection() {
 			ctx.slots.inject("conversation.input.dock", () =>
 				ctx.slots.register({
 					name: "conversation.input.dock",
-					id: "ds_zhuzhu_use",
+					id: "dsh-plugin-zhuzhu-use",
 					order: 50
 				}, Badge)
 			);

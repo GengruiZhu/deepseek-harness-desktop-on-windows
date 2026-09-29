@@ -33,7 +33,7 @@ import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
-export const name = 'ds_zhuzhu_use'
+export const name = 'dsh-plugin-zhuzhu-use'
 // 官方桌面壳在 apps/desktop-host/config/desktop.cordis.patch.yml 里把 webserver 整行
 // disabled 了 —— 桌面进程里没有 ctx.webServer。官方留的等价扩展点是 connection 的
 // exact Fetch route：apps/desktop-host/src/index.ts 用

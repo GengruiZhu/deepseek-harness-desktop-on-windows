@@ -1,0 +1,8 @@
+# dsh-plugin-zhuzhu-use bundle patch: inserts its plugin row into the web plugin roster.
+# One row mounts BOTH halves: the host side (the /api/ds-zhuzhu-use/* JSON routes and
+# the /usage + /explain-usage commands) and the browser side (the peak/valley
+# pricing-period badge rendered above the composer input).
+# The row name MUST equal the npm package name — Node resolves the module by it.
+- insert:
+    - id: dsh-plugin-zhuzhu-use
+      name: 'dsh-plugin-zhuzhu-use'
