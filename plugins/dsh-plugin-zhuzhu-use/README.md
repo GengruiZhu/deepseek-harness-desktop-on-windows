@@ -14,6 +14,13 @@
 - **宠物按需安装/卸载**：下载进度、取消、卸载
 - 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
 
+**0.3.4 —— 余额直读官方账户、用量免手工令牌、点徽章随时看卡片**：
+
+- **余额直读官方账户**：改用官方账户服务（`ctx.get('deepseekAccount').getBalance()`，desktop profile 的 base bundle 提供 `@deepseek-ai/dsh-deepseek-account-platform` 这一行）—— 充值 + 赠金钱包按币种合并，**不再依赖 API Key，也不需要任何 platform 操作**；服务缺失 / 未登录 / 查询失败时回退原来的 API Key 路径（两条路各自独立，谁成功用谁）
+- **platform 用量免手工令牌**：优先用官方 `getPlatformSession()`（Host-only 的 origin/token 快照，带 desktop 请求头）去查用量接口，origin 也以官方给的为准；手工粘贴的 `userToken` 降为回退（官方未登录时才需要）
+- **点徽章即可看用量卡片**：时段徽章现在可点击，就地展开 `UsageCard`（走 `/api/ds-zhuzhu-use/usage-card` + 本地渲染，**不经过 composer 提交**）—— 会话跑着的时候也能随时看，不必等这一轮结束再敲 `/usage`；`⚙` 仍单独用于手工令牌
+- 卡片余额区渲染新结构：`币种 总额`，副行 `赠金 x · 充值 y · 来源（官方账户直读 / API Key / 未登录账户）`
+
 **0.3.4 —— 宠物三处「看起来像鬼畜」的 bug（全部有量化复现）**：
 
 - **状态气泡会把整只宠物往下推**：气泡以前是列方向的第一个兄弟，而拖过之后容器按 `top/left` 钉住 —— 于是一冒泡整只宠物就下移 `bubbleH` 像素，状态每变一次（IDLE↔WORKING…）就上下跳一次。改成 `position:absolute` 挂在精灵上方，不再参与布局
@@ -182,6 +189,13 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
 **Current version `0.3.4`** (npm latest) — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+
+**0.3.4 — balance straight from the official account, no manual token, clickable badge (plus three pet fixes):**
+
+- **Balance reads the official account directly**: `ctx.get('deepseekAccount').getBalance()` (the desktop base bundle provides `@deepseek-ai/dsh-deepseek-account-platform`) returns recharge and bonus wallets merged per currency — no API key, no platform step. The API-key path stays as a fallback when the service is missing, signed out, or the query fails; the two paths are independent.
+- **Usage no longer needs a hand-pasted token**: the platform usage endpoint prefers the official `getPlatformSession()` Host-only origin/token snapshot (desktop headers included) and takes its origin; a pasted `userToken` is only a fallback now.
+- **The period badge is clickable** and expands `UsageCard` in place through `/api/ds-zhuzhu-use/usage-card` with local rendering — **not through the composer** — so it works while a turn is running instead of waiting to type `/usage`. The gear still opens the manual token box.
+- **Pet fixes** (details in the Chinese section above): the status bubble no longer pushes the sprite down (`position:absolute`), the gaze baseline moved from 33% to 15% of the sprite height (`gazeFaceY` override supported), and the `pet-assets` frames were re-anchored per clip (`look` right half 32px, `blink_double` 97px, `running-*` 174–197px) with neighbor-frame slivers removed — **re-download the pet zips to get the aligned frames**.
 
 > ⚠️ **Rename notice**: the old package [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use) (0.2.0) is deprecated; the new one is [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use). Do not install both — the plugin row id and the module name both changed, and keeping both leaves a dangling row in the profile.
 
