@@ -1462,9 +1462,6 @@ function petScanDir(root, builtin) {
         // 加字段时得手动往这里补，否则就是静默拿到空串。
         strollLeftClip: typeof m.strollLeftClip === 'string' ? m.strollLeftClip : '',
         strollRightClip: typeof m.strollRightClip === 'string' ? m.strollRightClip : '',
-        // 注视基准点：「脸」在精灵里的相对高度（0~1）。不声明就用客户端默认的 0.15。
-        // 必须在这里透出去 —— 客户端读的是宿主这一层吐出来的资源对象。
-        gazeFaceY: Number.isFinite(Number(m.gazeFaceY)) ? Number(m.gazeFaceY) : 0,
         framesDir: String(m.framesDir || '.'),
         baseSize: Number(m.baseSize) || 0,
         portrait,

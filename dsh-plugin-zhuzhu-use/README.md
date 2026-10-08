@@ -6,19 +6,13 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.3.7`**（npm latest）—— **0.3.3 的功能 + 宠物修复**。0.3.4 / 0.3.5 / 0.3.6 是在「余额直读官方账户、用量免手工令牌」上的一次失败尝试（官方账户服务在本套内核里读不出余额、官方会话 token 不能用于用量接口），**三个版本已从 npm 撤回**，相关代码全部撤销；只保留其中与宠物有关的三处修复。0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
+**当前版本 `0.3.3`**（npm latest）—— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
 
 - **子代理驱动管理**（设置 →「子代理」）：Codex CLI / Claude Code SDK 两个可选 provider 可单独装、单独删（自研 pnpm 驱动、NDJSON 事件流进度、可取消可重试、装完复核三项清单、删除含 `.pnpm` 真内容与孤儿清理）
 - **插件更新管理**：检查更新 / 单个更新 / 全部更新
 - **Agent 预设修复**：内核升级改名后一键修 profile 里的旧行
 - **宠物按需安装/卸载**：下载进度、取消、卸载
 - 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
-
-**0.3.7 保留的三处宠物修复**（源起 0.3.4，量化复现后改的）：
-
-- **状态气泡不再把整只宠物往下推**：气泡原来是列方向的第一个兄弟，而拖过之后容器按 `top` 钉住 —— 一冒泡整只宠物就下移 `bubbleH` 像素，状态每变一次就上下跳一次。改成 `position:absolute` 挂在精灵上方，不再参与布局
-- **注视基准点从 33% 改为 15%**：`dy` 原用「精灵高度的 33%」当脸的位置，而 576×624 的帧里眼睛在 y≈89（**14%**）—— 基准点掉到胸口，和眼睛齐平的光标会被判成在下方，越靠两边越偏成 down-left / down-right；现在支持资源用 `gazeFaceY` 覆盖
-- **资源侧**（见 `pets/README.md`）：`pet-assets` 分支上的帧做过一次**锚点重排**（每帧原来按自己的包围盒独立归一化，`blink_double` 四帧整体横移 97px、`look` 右半边漂 32px、`running-*` 漂 174~197px），并剔掉了 `sleep/02`、`sleep/03` 上贯穿全高的 3px 邻帧竖条
 
 > ⚠️ **更名说明**：旧包 [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use)（0.2.0）已弃用，新包为 [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use)。
 > 两者**不能同时安装**（插件行 id 与模块名都变了，同时存在会在 profile 里留下悬空行）。
@@ -110,8 +104,8 @@ dsh-plugin-zhuzhu-use
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.7.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.7.tgz` 的**绝对路径** |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.3.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.3.tgz` 的**绝对路径** |
 | **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
@@ -120,7 +114,7 @@ dsh-plugin-zhuzhu-use
 ### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.7.tgz"   # 本地 tgz（本分支根目录）
+npm install ".\dsh-plugin-zhuzhu-use-0.3.3.tgz"   # 本地 tgz（本分支根目录）
 npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
@@ -181,13 +175,7 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Current version `0.3.7`** (npm latest) — **the 0.3.3 feature set plus the pet fixes**. 0.3.4 / 0.3.5 / 0.3.6 were a failed attempt at "read the balance from the official account and drop the hand-copied usage token" (this kernel's account service cannot read the balance, and the account session token is not the platform usage token); **all three were unpublished from npm** and their code is fully reverted — only the three pet fixes survive. 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
-
-**The three pet fixes kept in 0.3.7** (first made in 0.3.4, each measured before changing):
-
-- **The status bubble no longer pushes the sprite down**: it used to be the first sibling in a column while a dragged container is pinned by `top`, so a bubble shifted the whole pet down by `bubbleH` — once per state change. It is now `position:absolute` above the sprite and takes no part in layout.
-- **The gaze baseline moved from 33% to 15%**: `dy` used "33% of the sprite height" as the face position, while in a 576×624 frame the eyes sit at y≈89 (**14%**) — the baseline landed on the chest, so a cursor level with the eyes counted as below and drifted to down-left / down-right near the edges. Resources may override it with `gazeFaceY`.
-- **Asset side** (see `pets/README.md`): the frames on the `pet-assets` branch were re-anchored (each frame used to normalize by its own bounding box — `blink_double` shifted 97px across four frames, the `look` right half 32px, `running-*` 174–197px) and the 3px full-height slivers on `sleep/02` / `sleep/03` were dropped.
+**Current version `0.3.3`** (npm latest) — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
 
 > ⚠️ **Rename notice**: the old package [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use) (0.2.0) is deprecated; the new one is [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use). Do not install both — the plugin row id and the module name both changed, and keeping both leaves a dangling row in the profile.
 
@@ -207,8 +195,8 @@ It is published to the npm registry, so the installer fetches it automatically (
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.7.tgz` |
-| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.7.tgz` at the branch root |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.3.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.3.tgz` at the branch root |
 | **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
 > A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
@@ -216,7 +204,7 @@ It is published to the npm registry, so the installer fetches it automatically (
 **Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.7.tgz"   # local tarball from this branch
+npm install ".\dsh-plugin-zhuzhu-use-0.3.3.tgz"   # local tarball from this branch
 npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
