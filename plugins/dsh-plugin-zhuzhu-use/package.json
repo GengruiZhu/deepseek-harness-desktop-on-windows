@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-zhuzhu-use",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "梁文峰/梁文谷：峰谷时段徽章 + /usage 余额卡片 + 内嵌网页版面板 + 宠物 + 文档预览 + 会话版本（dsh 插件；原名 ds_zhuzhu_use）",
   "type": "module",
   "main": "src/index.js",

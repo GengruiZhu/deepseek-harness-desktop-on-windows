@@ -84,9 +84,6 @@ window.__ModuleLoader__.load({
 			const [showToken, setShowToken] = useState(false);
 			const [tokenDraft, setTokenDraft] = useState("");
 			const [tokenMsg, setTokenMsg] = useState("");
-			// 点徽章直接展开用量卡片：走 HTTP 路由 + 本地渲染，不经过 composer 提交，
-			// 所以会话正在跑的时候也能随时看（以前只能等这一轮结束才有反应）。
-			const [showCard, setShowCard] = useState(false);
 
 			function saveToken() {
 				const t = (tokenDraft || "").trim();
@@ -125,32 +122,25 @@ window.__ModuleLoader__.load({
 				{ style: { display: "flex", justifyContent: "center", padding: "0 0 2px 0", fontFamily: "inherit", flexDirection: "column", alignItems: "center", gap: "4px" } },
 				react.createElement(
 					"div",
-					{ title: title + " —— 点击查看余额与用量（不必等会话空闲）", onClick: () => setShowCard((v) => !v), style: {
-							display: "inline-flex", alignItems: "center", gap: "6px", padding: "1px 10px", borderRadius: "999px", border: "1px solid " + c.border, background: c.bg, color: c.text, fontSize: "12px", lineHeight: "18px", userSelect: "none", pointerEvents: "auto", cursor: "pointer"
+					{ title, style: {
+							display: "inline-flex", alignItems: "center", gap: "6px", padding: "1px 10px", borderRadius: "999px", border: "1px solid " + c.border, background: c.bg, color: c.text, fontSize: "12px", lineHeight: "18px", userSelect: "none", pointerEvents: "auto"
 						} },
 					react.createElement("span", { style: { width: "6px", height: "6px", borderRadius: "999px", background: c.dot, display: "inline-block", flex: "none" } }),
 					react.createElement("span", null, p.name),
 					p.nextSwitchMs ? react.createElement("span", { style: { opacity: .72 } }, countdown + p.nextName) : null,
-					react.createElement("button", { style: { background: "none", border: "none", color: c.text, cursor: "pointer", fontSize: "12px", padding: "0 0 0 4px", opacity: .75 }, title: "设置平台用量令牌（已登录官方账户时无需）", onClick: (e) => { e.stopPropagation(); setShowToken((s) => !s); } }, "⚙")
+					react.createElement("button", { style: { background: "none", border: "none", color: c.text, cursor: "pointer", fontSize: "12px", padding: "0 0 0 4px", opacity: .75 }, title: "设置平台用量令牌（首次）", onClick: () => setShowToken((s) => !s) }, "⚙")
 				),
 				showToken
 					? react.createElement(
 							"div",
 							{ style: { fontSize: "11px", color: "var(--dsw-alias-label-secondary, #888)", display: "flex", flexDirection: "column", gap: "4px", alignItems: "center", maxWidth: "360px", textAlign: "center" } },
-							react.createElement("div", null, "平台用量令牌（进阶，一般用不到）：桌面版已登录 DeepSeek 账户时会**自动**复用官方会话，正常情况下这里不需要填任何东西。只有官方登录态不可用、而你又确实想看到用量明细时，才需要手工粘一次 —— 登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，把结果粘贴到下面"),
+							react.createElement("div", null, "平台用量令牌（首次）：登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，复制结果粘贴到下面"),
 							react.createElement("input", { type: "password", value: tokenDraft, onChange: (e) => setTokenDraft(e.target.value), placeholder: "粘贴 userToken……", style: { width: "300px", padding: "3px 6px", fontSize: "11px", borderRadius: "4px", border: "1px solid #555", background: "#222", color: "#eee" } }),
 							react.createElement("div", { style: { display: "flex", gap: "6px" } },
 								react.createElement("button", { onClick: saveToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "保存"),
 								react.createElement("button", { onClick: clearToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "清除")
 							),
 							react.createElement("div", { style: { opacity: .9 } }, tokenMsg)
-						)
-					: null,
-				showCard
-					? react.createElement(
-							"div",
-							{ style: { marginTop: 2, pointerEvents: "auto" } },
-							react.createElement(UsageCard, null)
 						)
 					: null
 			);
@@ -590,42 +580,17 @@ window.__ModuleLoader__.load({
 			const theme = isPeak
 				? { bg: "#fdecec", bar: "#dc2626", text: "#b91c1c" }
 				: { bg: "#e8f7ef", bar: "#059669", text: "#047857" };
-			const bal = data.balance && data.balance.ok ? data.balance : null;
-			const wallets = bal && bal.wallets ? bal.wallets : [];
-			const w0 = wallets[0] || null;
-			const balanceNum = w0 ? Number(w0.total) : NaN;
-			const balanceCur = w0 && w0.currency ? w0.currency : currency;
-			// 账户那条路若失败，正文只给「一句话结论」；原始报错（可能是天书）只挂在 title 上，
-			// 免得卡片正面变成调试面板 —— 排查时悬停仍能看到全部细节。
-			const shortAccountNote = (note) => {
-				const t = String(note || "");
-				if (!t) return "";
-				if (/尚未登录|未登录|signed-out/.test(t)) return "账户未登录";
-				if (/没读到官方账户|no-account-service/.test(t)) return "账户不可用";
-				if (/查询失败|not ok|failed/.test(t)) return "账户查询失败";
-				return "账户暂不可用";
-			};
-			const balanceNote = bal && bal.source === "apikey" ? shortAccountNote(bal.accountNote) : "";
-			const balanceSource = bal
-				? (bal.source === "account"
-						? "官方账户直读"
-						: (balanceNote ? "API Key（账户：" + balanceNote + "）" : "API Key"))
-				: ((data.balance && data.balance.signedOut) ? "未登录账户" : "查询失败");
-			const balanceSub = w0
-				? [
-						w0.bonus != null ? "赠金 " + Number(w0.bonus).toFixed(2) : null,
-						w0.recharge != null ? "充值 " + Number(w0.recharge).toFixed(2) : null,
-						balanceSource
-					].filter(Boolean).join(" · ")
-				: balanceSource;
+			const bal = data.balance && data.balance.ok ? data.balance.data : null;
+			const balInfo = bal && bal.balance_infos && bal.balance_infos[0] ? bal.balance_infos[0] : null;
+			const balanceNum = balInfo ? Number(balInfo.total_balance) : NaN;
 			const usage = data.usage;
 			const okUsage = usage && !usage.error;
 			const todayCost = okUsage ? usage.today.cost : 0;
 			const todayTokens = okUsage ? usage.today.tokens : 0;
 			const currency = okUsage && usage.currency ? usage.currency : "CNY";
 
-			const stat = (label, value, sub, hint) =>
-				react.createElement("div", { title: hint || undefined, style: { display: "flex", flexDirection: "column", gap: 2 } },
+			const stat = (label, value, sub) =>
+				react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
 					react.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #888)" } }, label),
 					react.createElement("div", { style: { fontSize: 14, fontWeight: 600, color: "var(--dsw-alias-label-primary, #222)" } }, value),
 					sub ? react.createElement("div", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #999)" } }, sub) : null
@@ -659,11 +624,10 @@ const cardStyle = {
 				),
 				react.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 14px" } },
 					stat("今日消费", currency + " " + fmtMoney2(todayCost)),
-					stat("余额", Number.isFinite(balanceNum) ? balanceCur + " " + balanceNum.toFixed(2) : balanceSource, balanceSub,
-						bal && bal.accountNote ? "官方账户那条路：" + String(bal.accountNote) + (bal.accountVia ? "（读法：" + bal.accountVia + "）" : "") : undefined)
+					stat("余额", Number.isFinite(balanceNum) ? currency + " " + balanceNum.toFixed(2) : "查询失败")
 				),
 				usage && usage.error
-					? react.createElement("div", { title: String(usage.error), style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量暂不可得：这条只走 platform 登录态（可在上方 ⚙ 粘贴一次，长期有效）。余额不受影响。")
+					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（可重新设置平台令牌）")
 					: null
 			);
 		}

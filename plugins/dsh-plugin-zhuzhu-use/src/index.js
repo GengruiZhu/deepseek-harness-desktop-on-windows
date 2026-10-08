@@ -2978,40 +2978,40 @@ function openInExplorer(targetPath) {
 
 // ---- Usage 富卡片数据（供客户端 commandview 渲染）----
 async function usageCardPayload(ctx) {
+  const token = readToken()
   const scope = readScope()
-  const cred = await platformCredential(ctx)
   const [period, balance, usage, progress] = await Promise.all([
     Promise.resolve(periodPayload()),
     fetchBalance(ctx).catch(() => ({ ok: false, error: 'balance-failed', message: '余额查询失败' })),
     (async () => {
-      if (!cred) return null
+      if (!token) return null
       try {
-        return await usageReport(ctx, scope)
+        return await usageReport(token, scope)
       } catch (e) {
         return { error: e && e.message ? e.message : String(e) }
       }
     })(),
     Promise.resolve(periodProgress()),
   ])
-  return { period, balance, usage, progress, hasToken: !!cred, usageReady: !!cred, credential: cred ? cred.source : null, scope }
+  return { period, balance, usage, progress, hasToken: !!token, scope }
 }
 
 // 范围下拉的选项：真实存在的 API Key 名与模型 id。10 分钟内复用一次抓取结果。
 let scopeOptionsCache = { at: 0, data: null }
 
-async function scopePayload(ctx) {
+async function scopePayload() {
   const scope = readScope()
   if (scopeOptionsCache.data && Date.now() - scopeOptionsCache.at < 10 * 60 * 1000) {
     return { scope, options: scopeOptionsCache.data }
   }
-  const cred = await platformCredential(ctx)
-  if (!cred) return { scope, options: { keys: [], models: [] }, error: '未配置平台令牌' }
+  const token = readToken()
+  if (!token) return { scope, options: { keys: [], models: [] }, error: '未配置平台令牌' }
   try {
     const now = new Date()
     const tzSec = -now.getTimezoneOffset() * 60
     const endSec = localMidnightSec(fmtDate(now)) + 86400
     const start30 = localMidnightSec(fmtDate(new Date(now.getTime() - 29 * 86400000)))
-    const u = await platformUsage(cred, start30, endSec, tzSec, SCOPE_ALL)
+    const u = await platformUsage(token, start30, endSec, tzSec, SCOPE_ALL)
     const data = { keys: u.keys, models: u.allModels }
     scopeOptionsCache = { at: Date.now(), data }
     return { scope, options: data }
@@ -3089,142 +3089,9 @@ async function getApiKey(ctx) {
   } catch (_) { return null }
 }
 
-/**
- * 官方账户的两条路，都是可选的（web / 自建壳没有）：
- *
- * 1. `remote.account` —— Remote BFF 命名空间，**官方设置页的账户页走的就是它**
- *    （`ctx.remote.account.getBalance()` → `{ ok, value }`），Host 侧同样可读。
- * 2. `deepseekAccount` 服务本体 —— 只有它能给 `getPlatformSession()`（platform 会话快照），
- *    但**必须已经就绪**：没 start 的实例一调用就抛 `Cannot read properties of undefined`
- *    （它内部第一句就是 `this.detailsLifetime.signal`）。就绪实例由 apply 里的
- *    `ctx.inject(['deepseekAccount'], …)` 回调填进来 —— 那才是 cordis 给可选依赖的正路。
- *
- * 每条读法单独 try，任一条拿到就用；`via` 记下是哪条（诊断用）。
- */
-let readyAccount = null
-
-function accountClients(ctx) {
-  const out = { rpc: null, rpcVia: null, svc: readyAccount, svcVia: readyAccount ? 'ctx.inject' : null }
-  if (!out.svc) {
-    for (const [via, read] of [
-      ['ctx.get', () => (typeof ctx.get === 'function' ? ctx.get('deepseekAccount') : undefined)],
-      ['ctx.reflect.get', () => (ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('deepseekAccount', false) : undefined)],
-      ['ctx.deepseekAccount', () => ctx.deepseekAccount],
-    ]) {
-      try { const s = read(); if (s && typeof s.getBalance === 'function') { out.svc = s; out.svcVia = via; break } } catch (_) { /* 换下一条 */ }
-    }
-  }
-  for (const [via, read] of [
-    ['ctx.remote.account', () => (ctx.remote ? ctx.remote.account : undefined)],
-    ['ctx.get(remote.account)', () => (typeof ctx.get === 'function' ? ctx.get('remote.account') : undefined)],
-    ['ctx.reflect.get(remote.account)', () => (ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('remote.account', false) : undefined)],
-  ]) {
-    try { const c = read(); if (c && typeof c.getBalance === 'function') { out.rpc = c; out.rpcVia = via; break } } catch (_) { /* 换下一条 */ }
-  }
-  return out
-}
-
-/** `AccountDetails['balance']` → 统一钱包结构；不是 ready 就返回 null。 */
-function walletsFromDetails(details, via) {
-  if (!details || details.status !== 'ready') return null
-  const collect = (list) => {
-    const out = new Map()
-    for (const w of list || []) {
-      const currency = String((w && w.currency) || 'CNY')
-      out.set(currency, String((w && w.balance) != null ? w.balance : '0'))
-    }
-    return out
-  }
-  const recharge = collect(details.value)
-  const bonus = collect(details.bonusWallets)
-  const wallets = [...new Set([...recharge.keys(), ...bonus.keys()])].map((currency) => {
-    const r = recharge.has(currency) ? toNum(recharge.get(currency)) : NaN
-    const b = bonus.has(currency) ? toNum(bonus.get(currency)) : NaN
-    return {
-      currency,
-      recharge: recharge.has(currency) ? recharge.get(currency) : null,
-      bonus: bonus.has(currency) ? bonus.get(currency) : null,
-      total: String((Number.isFinite(r) ? r : 0) + (Number.isFinite(b) ? b : 0)),
-    }
-  })
-  if (!wallets.length) return null
-  return { ok: true, source: 'account', wallets, via }
-}
-
-/** 账户路径诊断（只读，不改任何状态）。 */
-export async function accountProbe(ctx) {
-  const { rpc, rpcVia, svc, svcVia } = accountClients(ctx)
-  const out = {
-    hasGet: typeof ctx.get === 'function',
-    hasReflect: !!(ctx.reflect && typeof ctx.reflect.get === 'function'),
-    rpc: !!rpc, rpcVia, svc: !!svc, svcVia,
-    balance: null, platformSession: null,
-  }
-  if (rpc) {
-    try {
-      const r = await rpc.getBalance()
-      out.balance = r && r.ok === false ? 'rpc-not-ok' : 'ok'
-    } catch (e) { out.balance = 'throw:' + String((e && e.message) || e) }
-  }
-  if (svc && typeof svc.getPlatformSession === 'function') {
-    try {
-      const s = await svc.getPlatformSession()
-      out.platformSession = s && s.token ? 'ok(' + String(s.origin || '') + ')' : 'null'
-    } catch (e) { out.platformSession = 'throw:' + String((e && e.message) || e) }
-  } else if (svc) {
-    out.platformSession = 'method-missing'
-  }
-  return out
-}
-
-/**
- * 官方账户余额：充值钱包 + 赠金钱包，按币种合并。不碰 API Key，也不需要 platform 令牌。
- * @returns `{ ok: true, source: 'account', wallets }`；未登录时 `{ ok: false, signedOut: true }`。
- */
-async function accountWallets(ctx) {
-  const { rpc, rpcVia, svc, svcVia } = accountClients(ctx)
-  // 1) Remote BFF —— 官方设置页同款，最稳；返回 `{ ok, value }`
-  if (rpc) {
-    try {
-      const r = await rpc.getBalance()
-      if (r && r.ok === false) return { ok: false, error: 'account-failed', message: '账户余额查询失败（remote.account 返回 not ok）', via: rpcVia }
-      const details = r && typeof r === 'object' && 'value' in r ? r.value : r
-      const viaRpc = walletsFromDetails(details, rpcVia)
-      if (viaRpc) return viaRpc
-      if (!details) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户', via: rpcVia }
-      return { ok: false, error: 'account-failed', message: '账户余额不可用（' + (details.status || 'empty') + '）', via: rpcVia }
-    } catch (_) { /* 落到服务本体 */ }
-  }
-  // 2) 服务本体（只有已就绪的实例才敢调用）
-  if (svc) {
-    try {
-      const res = await svc.getBalance()
-      if (!res) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户', via: svcVia }
-      const viaSvc = walletsFromDetails(res, svcVia)
-      if (viaSvc) return viaSvc
-      return { ok: false, error: 'account-failed', message: '账户余额不可用（' + (res.status || 'empty') + '）', via: svcVia }
-    } catch (err) {
-      return { ok: false, error: 'account-failed', message: String((err && err.message) || err), via: svcVia }
-    }
-  }
-  return { ok: false, error: 'no-account-service', message: '没读到官方账户（remote.account 与 deepseekAccount 都没拿到）' }
-}
-
-/**
- * 余额：优先直读官方账户（无需 API Key / platform 令牌），查不到或未登录时回退 API Key 查开放平台。
- * 两条路各自独立 —— 账户那条失败不该挡住 API Key 那条。
- * @returns 统一结构 `{ ok, source: 'account' | 'apikey', wallets }`，失败时带 `error` / `message`。
- */
 async function fetchBalance(ctx) {
-  const viaAccount = await accountWallets(ctx)
-  if (viaAccount.ok) return viaAccount
   const key = await getApiKey(ctx)
-  if (!key) {
-    if (viaAccount.signedOut) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户，也没有可用的 API Key' }
-    return viaAccount.error === 'no-account-service'
-      ? { ok: false, error: 'no-key', message: '未找到 DeepSeek API Key' }
-      : viaAccount
-  }
+  if (!key) return { ok: false, error: 'no-key', message: '未找到 DeepSeek API Key' }
   try {
     const res = await fetch('https://api.deepseek.com/user/balance', {
       headers: { authorization: 'Bearer ' + key },
@@ -3235,15 +3102,7 @@ async function fetchBalance(ctx) {
       const msg = data && data.error && data.error.message ? data.error.message : 'HTTP ' + res.status
       return { ok: false, error: 'http-' + res.status, message: msg }
     }
-    const wallets = ((data && data.balance_infos) || []).map((b) => ({
-      currency: String(b.currency || 'CNY'),
-      recharge: b.topped_up_balance != null ? String(b.topped_up_balance) : null,
-      bonus: b.granted_balance != null ? String(b.granted_balance) : null,
-      total: b.total_balance != null ? String(b.total_balance) : null,
-    }))
-    if (!wallets.length) return { ok: false, error: 'empty', message: '账户暂无余额信息' }
-    // 记下"为什么没用官方账户" —— 卡片副行会带上，用户一眼能看出是没登录、服务读不到、还是查询失败。
-    return { ok: true, source: 'apikey', wallets, accountNote: viaAccount.message || viaAccount.error, accountVia: viaAccount.via || null }
+    return { ok: true, data }
   } catch (err) {
     return { ok: false, error: 'fetch-failed', message: String((err && err.message) || err) }
   }
@@ -3261,18 +3120,18 @@ function fmtMoney(n) {
   return x.toFixed(2)
 }
 
-function balanceLines(bal) {
-  const wallets = (bal && bal.wallets) || []
-  if (!wallets.length) return ['账户暂无余额信息']
+function balanceLines(data) {
+  const infos = (data && data.balance_infos) || []
+  if (!infos.length) return ['账户暂无余额信息']
   const lines = []
-  for (const w of wallets) {
-    const currency = w.currency || 'CNY'
-    const total = toNum(w.total)
-    lines.push(currency + ' 总余额: ' + (Number.isFinite(total) ? fmtMoney(total) : '–'))
-    if (w.bonus != null) lines.push('  赠金: ' + fmtMoney(w.bonus))
-    if (w.recharge != null) lines.push('  充值: ' + fmtMoney(w.recharge))
+  for (const b of infos) {
+    const currency = b.currency || 'CNY'
+    lines.push(currency + ' 总余额: ' + fmtMoney(b.total_balance))
+    const granted = toNum(b.granted_balance)
+    const topped = toNum(b.topped_up_balance)
+    if (Number.isFinite(granted)) lines.push('  赠金: ' + fmtMoney(granted))
+    if (Number.isFinite(topped)) lines.push('  充值: ' + fmtMoney(topped))
   }
-  lines.push(bal && bal.source === 'account' ? '  （来源：官方账户直读）' : '  （来源：API Key）')
   return lines
 }
 
@@ -3320,37 +3179,13 @@ function writeScope(scope) {
   return next
 }
 
-const PLATFORM_ORIGIN = 'https://platform.deepseek.com'
-const PLATFORM_BASE = PLATFORM_ORIGIN + '/api/v0/usage'
+const PLATFORM_BASE = 'https://platform.deepseek.com/api/v0/usage'
+const PLATFORM_HEADERS = [
+  'Referer: https://platform.deepseek.com/usage',
+  'Origin: https://platform.deepseek.com',
+]
 const NO_TOKEN_MSG =
-  '平台用量（每个模型当日消费）需要 platform 登录态。桌面版已登录 DeepSeek 账户时会自动复用官方会话，不必手工操作；没有官方登录态时，可登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem("userToken")).value，把结果粘到输入框上方「⚙」入口（存本地，重启自动读取）。余额不受影响。'
-
-/**
- * platform 用量凭据：官方账户会话优先 —— `getPlatformSession()` 给的是 Host-only 的
- * origin/token 快照，用户不必再手工粘贴 userToken；没有官方登录态时回退到手工令牌。
- * @returns `{ token, origin, headers, source: 'account' | 'manual' }`，两者都没有时为 null。
- */
-async function platformCredential(ctx) {
-  const { svc, svcVia } = accountClients(ctx)
-  if (svc && typeof svc.getPlatformSession === 'function') {
-    try {
-      const s = await svc.getPlatformSession()
-      if (s && s.token) {
-        const origin = String(s.origin || '').replace(/\/+$/, '') || PLATFORM_ORIGIN
-        return { token: String(s.token), origin, headers: s.requestHeaders || {}, source: 'account', via: svcVia }
-      }
-    } catch (_) { /* 拿不到就走下一步 */ }
-  }
-  const manual = readToken()
-  if (manual) return { token: manual, origin: PLATFORM_ORIGIN, headers: {}, source: 'manual', via: svcVia }
-  return null
-}
-
-/** usage 接口根：官方会话可能给非默认 origin，自己粘的令牌走默认 origin。 */
-function platformBase(cred) {
-  const origin = cred && cred.origin ? String(cred.origin).replace(/\/+$/, '') : PLATFORM_ORIGIN
-  return origin + '/api/v0/usage'
-}
+  '平台用量（每个模型当日消费）需要网页控制台会话令牌。首次使用：登录 https://platform.deepseek.com/usage → 按 F12 → 控制台执行 JSON.parse(localStorage.getItem("userToken")).value 并复制结果 → 在 input 上方「设为平台令牌」入口粘贴保存（存本地，重启自动读取）。余额不受影响。'
 
 function fmtDate(d) {
   const y = d.getFullYear(); const m = String(d.getMonth() + 1).padStart(2, '0'); const day = String(d.getDate()).padStart(2, '0')
@@ -3371,19 +3206,15 @@ function bucketTime(t, tzSec, bucket) {
 }
 const num = (v) => { if (v === null || v === undefined) return 0; if (typeof v === 'number') return v; const n = parseFloat(String(v)); return Number.isFinite(n) ? n : 0 }
 
-async function platformFetch(url, cred, extraHeaders) {
+async function platformFetch(url, token, extraHeaders) {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), 15000)
-  const origin = cred && cred.origin ? String(cred.origin).replace(/\/+$/, '') : PLATFORM_ORIGIN
   try {
     const res = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         Accept: 'application/json, text/plain, */*',
-        ...(cred && cred.token ? { Authorization: 'Bearer ' + cred.token } : {}),
-        ...(cred && cred.headers ? cred.headers : {}),
-        Referer: origin + '/usage',
-        Origin: origin,
+        ...(token ? { Authorization: 'Bearer ' + token } : {}),
         ...(extraHeaders || {}),
       },
       signal: ctrl.signal,
@@ -3406,11 +3237,10 @@ async function platformFetch(url, cred, extraHeaders) {
 
 // 抓平台用量（start/end 为秒）。series 的真实维度是 (api_key × model)，过去只按
 // model 聚合把 api key 那层丢了；现在两个维度都聚，并支持 scope 过滤。
-async function platformUsage(cred, startSec, endSec, tzSec, scope) {
+async function platformUsage(token, startSec, endSec, tzSec, scope) {
   const q = 'start=' + startSec + '&end=' + endSec + '&tz=' + tzSec
-  const base = platformBase(cred)
-  const amountR = await platformFetch(base + '/by_api_key/amount?' + q, cred)
-  const costR = await platformFetch(base + '/by_api_key/cost?' + q, cred)
+  const amountR = await platformFetch(PLATFORM_BASE + '/by_api_key/amount?' + q, token, PLATFORM_HEADERS)
+  const costR = await platformFetch(PLATFORM_BASE + '/by_api_key/cost?' + q, token, PLATFORM_HEADERS)
   const bizAmount = amountR && amountR.data ? amountR.data.biz_data : null
   const bizCost = costR && costR.data ? costR.data.biz_data : null
   if (!bizAmount) throw new Error('amount 响应结构异常')
@@ -3577,14 +3407,12 @@ async function platformUsage(cred, startSec, endSec, tzSec, scope) {
 
 // 聚合近 7/30 天趋势 + 当日总额 + 按模型/按 API Key 明细 + 缓存命中率。
 // scope = { key: 'all' | <api key 名>, model: 'all' | <模型 id> }
-async function usageReport(ctx, scope) {
-  const cred = await platformCredential(ctx)
-  if (!cred) throw new Error(NO_TOKEN_MSG)
+async function usageReport(token, scope) {
   const now = new Date()
   const tzSec = -now.getTimezoneOffset() * 60
   const endSec = localMidnightSec(fmtDate(now)) + 86400
   const start30 = localMidnightSec(fmtDate(new Date(now.getTime() - 29 * 86400000)))
-  const usage = await platformUsage(cred, start30, endSec, tzSec, scope)
+  const usage = await platformUsage(token, start30, endSec, tzSec, scope)
   const today = fmtDate(now)
   const dayCost = {}
   const dayToken = {}
@@ -3710,19 +3538,19 @@ async function usageText(ctx) {
   lines.push('')
   lines.push('【DeepSeek 余额】')
   const bal = await fetchBalance(ctx)
-  if (bal.ok) lines.push(...balanceLines(bal))
+  if (bal.ok) lines.push(...balanceLines(bal.data))
   else lines.push('查询失败：' + (bal.message || bal.error))
   lines.push('')
   lines.push('【今日用量】')
-  const cred = await platformCredential(ctx)
-  if (!cred) {
-    lines.push('没有可用的 platform 登录态，无法显示每个模型当日消费。')
+  const token = readToken()
+  if (!token) {
+    lines.push('未配置平台用量令牌，无法显示每个模型当日消费。')
     lines.push(NO_TOKEN_MSG)
     lines.push('（余额查询不受影响。）')
   } else {
     try {
       const scope = readScope()
-      const u = await usageReport(ctx, scope)
+      const u = await usageReport(token, scope)
       const scopeLabel = []
       if (scope.key !== 'all') scopeLabel.push('API Key ' + scope.key)
       if (scope.model !== 'all') scopeLabel.push('模型 ' + scope.model)
@@ -3761,17 +3589,6 @@ function explainText() {
 }
 
 export function apply(ctx, config = {}) {
-  // 可选依赖：账户服务**就绪后**把实例存下来。这是 cordis 给可选依赖的正路 ——
-  // 写进 export const inject 会拖住整个插件（web / 自建壳没有这个服务就永远不加载），
-  // 而 reflect.get 拿到的可能是没 start 的实例（一调用就 TypeError）。
-  // 服务替换/重启时回调会重跑，所以引用跟着更新。
-  try {
-    ctx.inject(['deepseekAccount'], (scoped) => {
-      const svc = scoped.deepseekAccount
-      readyAccount = svc
-      return () => { if (readyAccount === svc) readyAccount = null }
-    })
-  } catch (_) { /* 没有 ctx.inject 的旧内核：忽略，读服务那几条路仍然会兜 */ }
   ctx.effect(() => {
     petEnsureTimer(ctx)
     // 官方安装器的阶段事件（我们只在 requestId 对得上时采用，别的安装与我们无关）。
@@ -3788,14 +3605,12 @@ export function apply(ctx, config = {}) {
     asarPatchStatus = ensurePersistentBrowserProfile()
     const disposers = [
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/asar-patch', () => ({ ok: true, data: asarPatchStatus }))),
-      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/account-probe', () => accountProbe(ctx).then((data) => ({ ok: true, data })))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/period', () => periodPayload())),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/balance', () => fetchBalance(ctx))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/usage', () => {
-        return platformCredential(ctx).then((cred) => {
-          if (!cred) return { ok: false, error: 'no-credential', message: NO_TOKEN_MSG }
-          return usageReport(ctx, readScope()).then((data) => ({ ok: true, data }))
-        })
+        const token = readToken()
+        if (!token) return { ok: false, error: 'no-token', message: NO_TOKEN_MSG }
+        return usageReport(token, readScope()).then((data) => ({ ok: true, data }))
       })),
       ctx.connection.fetch.register({
         path: '/api/ds-zhuzhu-use/pets/asset',
@@ -3904,7 +3719,7 @@ export function apply(ctx, config = {}) {
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/presets', () => ({ ok: true, data: presetReport() }))),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/presets/fix', (body) =>
         ({ ok: true, data: presetFix(String((body && body.id) || '')) }))),
-      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/scope', () => scopePayload(ctx).then((data) => ({ ok: true, data })))),
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/scope', () => scopePayload().then((data) => ({ ok: true, data })))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/chat', () => ({
         ok: true,
         data: { sessions: listChatSessions(), dir: webChatDir(), last: { key: chatLast.key, at: chatLast.at } },
