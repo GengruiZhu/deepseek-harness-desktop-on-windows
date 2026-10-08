@@ -84,6 +84,9 @@ window.__ModuleLoader__.load({
 			const [showToken, setShowToken] = useState(false);
 			const [tokenDraft, setTokenDraft] = useState("");
 			const [tokenMsg, setTokenMsg] = useState("");
+			// 点徽章直接展开用量卡片：走 HTTP 路由 + 本地渲染，不经过 composer 提交，
+			// 所以会话正在跑的时候也能随时看（以前只能等这一轮结束才有反应）。
+			const [showCard, setShowCard] = useState(false);
 
 			function saveToken() {
 				const t = (tokenDraft || "").trim();
@@ -122,25 +125,32 @@ window.__ModuleLoader__.load({
 				{ style: { display: "flex", justifyContent: "center", padding: "0 0 2px 0", fontFamily: "inherit", flexDirection: "column", alignItems: "center", gap: "4px" } },
 				react.createElement(
 					"div",
-					{ title, style: {
-							display: "inline-flex", alignItems: "center", gap: "6px", padding: "1px 10px", borderRadius: "999px", border: "1px solid " + c.border, background: c.bg, color: c.text, fontSize: "12px", lineHeight: "18px", userSelect: "none", pointerEvents: "auto"
+					{ title: title + " —— 点击查看余额与用量（不必等会话空闲）", onClick: () => setShowCard((v) => !v), style: {
+							display: "inline-flex", alignItems: "center", gap: "6px", padding: "1px 10px", borderRadius: "999px", border: "1px solid " + c.border, background: c.bg, color: c.text, fontSize: "12px", lineHeight: "18px", userSelect: "none", pointerEvents: "auto", cursor: "pointer"
 						} },
 					react.createElement("span", { style: { width: "6px", height: "6px", borderRadius: "999px", background: c.dot, display: "inline-block", flex: "none" } }),
 					react.createElement("span", null, p.name),
 					p.nextSwitchMs ? react.createElement("span", { style: { opacity: .72 } }, countdown + p.nextName) : null,
-					react.createElement("button", { style: { background: "none", border: "none", color: c.text, cursor: "pointer", fontSize: "12px", padding: "0 0 0 4px", opacity: .75 }, title: "设置平台用量令牌（首次）", onClick: () => setShowToken((s) => !s) }, "⚙")
+					react.createElement("button", { style: { background: "none", border: "none", color: c.text, cursor: "pointer", fontSize: "12px", padding: "0 0 0 4px", opacity: .75 }, title: "设置平台用量令牌（已登录官方账户时无需）", onClick: (e) => { e.stopPropagation(); setShowToken((s) => !s); } }, "⚙")
 				),
 				showToken
 					? react.createElement(
 							"div",
 							{ style: { fontSize: "11px", color: "var(--dsw-alias-label-secondary, #888)", display: "flex", flexDirection: "column", gap: "4px", alignItems: "center", maxWidth: "360px", textAlign: "center" } },
-							react.createElement("div", null, "平台用量令牌（首次）：登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，复制结果粘贴到下面"),
+							react.createElement("div", null, "平台用量令牌（可选手工回退）：桌面版已登录 DeepSeek 账户时会自动复用官方会话，这里不用填；仅当没有官方登录态时才需要 —— 登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，复制结果粘贴到下面"),
 							react.createElement("input", { type: "password", value: tokenDraft, onChange: (e) => setTokenDraft(e.target.value), placeholder: "粘贴 userToken……", style: { width: "300px", padding: "3px 6px", fontSize: "11px", borderRadius: "4px", border: "1px solid #555", background: "#222", color: "#eee" } }),
 							react.createElement("div", { style: { display: "flex", gap: "6px" } },
 								react.createElement("button", { onClick: saveToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "保存"),
 								react.createElement("button", { onClick: clearToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "清除")
 							),
 							react.createElement("div", { style: { opacity: .9 } }, tokenMsg)
+						)
+					: null,
+				showCard
+					? react.createElement(
+							"div",
+							{ style: { marginTop: 2, pointerEvents: "auto" } },
+							react.createElement(UsageCard, null)
 						)
 					: null
 			);
@@ -580,9 +590,21 @@ window.__ModuleLoader__.load({
 			const theme = isPeak
 				? { bg: "#fdecec", bar: "#dc2626", text: "#b91c1c" }
 				: { bg: "#e8f7ef", bar: "#059669", text: "#047857" };
-			const bal = data.balance && data.balance.ok ? data.balance.data : null;
-			const balInfo = bal && bal.balance_infos && bal.balance_infos[0] ? bal.balance_infos[0] : null;
-			const balanceNum = balInfo ? Number(balInfo.total_balance) : NaN;
+			const bal = data.balance && data.balance.ok ? data.balance : null;
+			const wallets = bal && bal.wallets ? bal.wallets : [];
+			const w0 = wallets[0] || null;
+			const balanceNum = w0 ? Number(w0.total) : NaN;
+			const balanceCur = w0 && w0.currency ? w0.currency : currency;
+			const balanceSource = bal
+				? (bal.source === "account" ? "官方账户直读" : "API Key")
+				: ((data.balance && data.balance.signedOut) ? "未登录账户" : "查询失败");
+			const balanceSub = w0
+				? [
+						w0.bonus != null ? "赠金 " + Number(w0.bonus).toFixed(2) : null,
+						w0.recharge != null ? "充值 " + Number(w0.recharge).toFixed(2) : null,
+						balanceSource
+					].filter(Boolean).join(" · ")
+				: balanceSource;
 			const usage = data.usage;
 			const okUsage = usage && !usage.error;
 			const todayCost = okUsage ? usage.today.cost : 0;
@@ -624,10 +646,10 @@ const cardStyle = {
 				),
 				react.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 14px" } },
 					stat("今日消费", currency + " " + fmtMoney2(todayCost)),
-					stat("余额", Number.isFinite(balanceNum) ? currency + " " + balanceNum.toFixed(2) : "查询失败")
+					stat("余额", Number.isFinite(balanceNum) ? balanceCur + " " + balanceNum.toFixed(2) : balanceSource, balanceSub)
 				),
 				usage && usage.error
-					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（可重新设置平台令牌）")
+					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（已登录官方账户时会自动复用其会话；否则可在上方 ⚙ 里手工设置平台令牌）")
 					: null
 			);
 		}
@@ -2622,6 +2644,7 @@ function PetOverlay() {
   const [sleeping, setSleeping] = useState(false);   // 长时间没动静 -> 打盹
   const [stroll, setStroll] = useState(null);        // 溜达中 {x0,x1,y,t0,dur}
   const boxRef = useRef(null);
+  const faceRef = useRef(null);             // 主宠物精灵本体的 DOM（注视基准要用它，不是整个容器）
   const dragRef = useRef(null);
   const pressRef = useRef(null);            // 长按计时器
   const reactRef = useRef(null);            // 互动反应的复位计时器
@@ -2746,10 +2769,11 @@ function PetOverlay() {
   // 注视光标：算出「宠物 -> 光标」的方位，挑 16 个朝向帧里的一个。
   // 角度约定跟 look-directions.png 的标签一致：0° 正上，顺时针（90°右 / 180°下 / 270°左），
   // 所以是 atan2(dx, -dy)。rAF 节流 + 值不变就不 setState（React 会跳过同值更新）。
-  // 气泡会把容器撑高，所以「脸」的基准要减掉气泡、按精灵本身算，不然一冒泡视线就偏上。
+  // 注视基准点 = 「脸」在精灵里的相对高度。**别再用 0.33** ——
+  // 576×624 的帧里眼睛在 y≈89，也就是 14%；按三分之一算等于把基准点放到胸口，
+  // 于是「和眼睛齐平」的光标会被算成在下方，越往两边越偏成 down-left/down-right。
+  // 资源可以用 gazeFaceY 覆盖（不同画师的构图不一样）。
   const pxNow = petSizePx((state && state.options) || {});
-  const bubbleFont = Math.max(11, Math.min(15, Math.round(pxNow * 0.115)));
-  const bubbleH = PET_BUBBLE[live] ? Math.round(bubbleFont * 2.9) : 0;
   // 只有「闲着」的时候才需要跟着光标转头。跑任务时（WORKING/...）根本不会注视，
   // 那就一个 mousemove 监听都不挂 —— 这是掉帧的主因之一，白白每帧量一次布局。
   // THINKING 也算：思考时宠物播的是 idle 段（不再单独抽搐），所以照样可以瞟光标。
@@ -2765,15 +2789,18 @@ function PetOverlay() {
       raf = 0;
       const e = last;
       if (!e) return;
-      const node = boxRef.current;
+      const node = faceRef.current || boxRef.current;
       if (!node) { setLook(null); return; }
       const now = Date.now();
       if (!rect || now - rectAt > 200) { rect = node.getBoundingClientRect(); rectAt = now; }
       if (!rect.width || !rect.height) { setLook(null); return; }
-      const spriteH = Math.max(1, rect.height - bubbleH);
-      // 「脸」大致在精灵块的上三分之一处
+      const faceY = (() => {
+        const r = petResRef.current;
+        const v = r && Number(r.gazeFaceY);
+        return Number.isFinite(v) && v > 0 ? Math.max(0.02, Math.min(0.6, v)) : 0.15;
+      })();
       const dx = e.clientX - (rect.left + rect.width / 2);
-      const dy = e.clientY - (rect.top + bubbleH + spriteH * 0.33);
+      const dy = e.clientY - (rect.top + rect.height * faceY);
       if (Math.hypot(dx, dy) < 24) { setLook(null); return; }   // 贴脸了就不扭
       const deg = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
       setLook(Math.round(deg / 22.5) % 16);
@@ -2795,7 +2822,7 @@ function PetOverlay() {
       window.removeEventListener("blur", onLeave);
       document.removeEventListener("mouseleave", onLeave);
     };
-  }, [canGaze, bubbleH, pxNow]);
+  }, [canGaze, pxNow]);
 
   if (!state || !state.enabled) return null;
   const inst = state.instances || [];
@@ -2961,18 +2988,31 @@ function PetOverlay() {
     inst.slice().reverse().map((it) =>
       react.createElement("div", {
         key: it.id,
+        ref: it.kind === "root" ? faceRef : null,
         title: it.kind === "root" ? ("主宠物 · " + live + "　单击互动 / 长按看看你 / 按住拖走") : ("子代理 " + it.owner),
         onPointerDown: grab,
         onPointerMove: move,
         onPointerUp: drop,
         onPointerCancel: ungrab,
         style: {
+          position: "relative",
           pointerEvents: "auto", cursor: dragging ? "grabbing" : "grab", touchAction: "none",
           display: "flex", flexDirection: "column", alignItems: "center",
         },
       },
         // 状态气泡只挂在主宠物头上（子代理自己不报状态）。
-        (it.kind === "root") ? react.createElement(PetBubble, { state: live, size: px }) : null,
+        // **必须绝对定位**：它以前是列方向的第一个兄弟，容器又是按 top 钉住的
+        // （拖过之后 pos 就是 top/left），所以「一冒泡」整只宠物就被往下推 bubbleH 像素 ——
+        // 状态每变一次（IDLE↔WORKING…）就上下跳一次，用户看到的就是「整个人乱飞」。
+        // 绝对定位后它不再参与布局，宠物原地不动。
+        (it.kind === "root")
+          ? react.createElement("div", {
+              style: {
+                position: "absolute", bottom: "100%", left: "50%",
+                transform: "translateX(-50%)", marginBottom: 6, pointerEvents: "none",
+              },
+            }, react.createElement(PetBubble, { state: live, size: px }))
+          : null,
         react.createElement(PetSprite, {
           resourceId: resId,
           resource: res,
