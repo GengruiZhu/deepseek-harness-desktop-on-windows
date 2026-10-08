@@ -2,16 +2,22 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
-## 插件 dsh-plugin-zhuzhu-use 0.3.6 (2026-10-08)
+## 插件 dsh-plugin-zhuzhu-use 0.3.7 (2026-10-08)
 
-**能用的部分保留并做干净：余额自动、点徽章看卡片；官方账户那条路修不了的部分不再摆到脸上。**
+**回到 0.3.3 的功能集 + 三处宠物修复。0.3.4 / 0.3.5 / 0.3.6 已从 npm 撤回，相关代码全部撤销。**
 
-- **点徽章即可看用量卡片**：时段徽章可点击 → 就地展开 `UsageCard`（走 `/api/ds-zhuzhu-use/usage-card` + 本地渲染，**不经过 composer 提交**），会话正在跑的时候也能随时看，不必等这一轮结束再敲 `/usage`
-- **余额自动显示**：优先直读官方账户（充值 + 赠金钱包按币种合并）；账户那条路不可用时回退 API Key —— 两条路各自独立，**都不需要用户手工操作**
-- **官方账户服务已能正确读到**：`ctx.get` 读不到、`reflect.get` 拿到的是没 start 的实例（调用即 `Cannot read properties of undefined`）；正路是 **`ctx.inject(['deepseekAccount'], cb)`** —— 服务就绪后回调。探针实测：`svcVia: "ctx.inject"`、`platformSession: "ok(https://platform.deepseek.com)"`
-- **已知限制（官方内核侧，插件改不了）**：`getBalance()` 在运行期会抛 `Cannot read properties of undefined (reading 'version')` —— 定位到 `getDetail()` 里 try 之外的 `readCurrentGrant()`；同一函数在 `getPlatformSession()` 里却正常，即**凭据读取时好时坏**。另外官方会话 token 不能用于 platform 用量接口（那是网页会话 userToken），所以**用量仍需在 ⚙ 里粘一次**（长期有效），余额不受影响
-- **卡片不再显示内部报错**：正文只给一句话结论（如「API Key（账户：账户暂不可用）」），原始报错移到悬停提示里
+- **为什么撤**：那三个版本是「余额直读官方账户、用量免手工令牌」的一次失败尝试（连续三次试错都不该以发版形式推到用户面前）。技术结论留档：官方账户服务 `ctx.get` 读不到、`reflect.get` 拿到的是**没 start** 的实例（调用即 `Cannot read properties of undefined`），`ctx.inject(['deepseekAccount'], cb)` 才是正路且实测能拿到就绪实例；但即便如此，`getBalance()` 在运行期仍会抛 `Cannot read properties of undefined (reading 'version')` —— 定位到官方 `getDetail()` 里 **try 之外**的 `readCurrentGrant()`（同一函数在 `getPlatformSession()` 里却正常，即凭据读取时好时坏，属**官方内核侧**问题）。另外官方会话 token 不能用于 platform 用量接口（那是网页会话 `userToken`），所以**用量免手工做不到**
+- **保留的部分**（源起 0.3.4，均先量化复现再改）：① 状态气泡改 `position:absolute`，不再把整只宠物往下推 `bubbleH` 像素；② 注视基准点 33% → **15%**（576×624 的帧里眼睛在 y≈89），并支持资源用 `gazeFaceY` 覆盖；③ `pet-assets` 分支上的帧做过**锚点重排**（段内摆幅 ≤ 2px）并剔掉 `sleep/02`、`sleep/03` 的 3px 邻帧竖条
+- **版本号用 0.3.7**：npm 上 0.3.4–0.3.6 撤回后该版本号不可复用
 - **另修（profile 侧，与版本无关）**：profile `cordis.patch.yml` 里那条插件行与 bundle patch 重复（官方插件管理器写入的启用行），会让客户端加载两份、卡片渲染成**两张** —— 该行已移除，只保留 bundle patch 的一份
+
+## 插件 dsh-plugin-zhuzhu-use 0.3.4–0.3.6（已撤回）
+
+**以下三版已在 npm 撤回，代码不再存在于仓库**（保留此段只为记录当时的意图与结论）。
+
+- 0.3.4：余额改为直读官方账户；用量免手工令牌；点徽章看用量卡片（并混入上面的三处宠物修复）
+- 0.3.5：可选服务改成多路尝试（`ctx.get` → `reflect.get` → 属性代理），把失败原因显示到卡片上
+- 0.3.6：改用 `ctx.inject` 拿就绪实例；卡片不再显示内部报错
 
 ## 插件 dsh-plugin-zhuzhu-use 0.3.4 (2026-09-29)
 
