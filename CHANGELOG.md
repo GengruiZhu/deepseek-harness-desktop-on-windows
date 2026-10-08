@@ -2,7 +2,7 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
-## 插件 dsh-plugin-zhuzhu-use 0.3.4 (2026-10-08)
+## 插件 dsh-plugin-zhuzhu-use 0.4.0 (2026-10-08)
 
 **余额直读官方账号服务；用量并进官方「账号与余额」页；`/usage` 按运行状态分流显示。**
 

@@ -6,7 +6,7 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.3.4`** —— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.4 陆续加了：
+**当前版本 `0.4.0`** —— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
 
 - **子代理驱动管理**（设置 →「子代理」）：Codex CLI / Claude Code SDK 两个可选 provider 可单独装、单独删（自研 pnpm 驱动、NDJSON 事件流进度、可取消可重试、装完复核三项清单、删除含 `.pnpm` 真内容与孤儿清理）
 - **插件更新管理**：检查更新 / 单个更新 / 全部更新
@@ -14,7 +14,7 @@
 - **宠物按需安装/卸载**：下载进度、取消、卸载
 - 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
 
-**0.3.4 改了什么**
+**0.4.0 改了什么**
 
 - **余额改读官方账号服务**（`ctx.get('deepseekAccount').getBalance()`，0.2.0-rc.2 起随「账号与余额」一起装）：不用再自备 API Key，口径和官方页面一致；老外壳或官方账号没登录时才退回开放 API + `DEEPSEEK_API_KEY`。
 - **用量并进官方的「账号与余额」页**：当前时段 / 今日消费 / 余额 / 官方用量页入口，以同款卡片样式挂在官方那两张卡片下面（官方那页没有插槽，所以是插件在自己这边画的节点挂上去，官方文件不改）。
@@ -112,8 +112,8 @@ dsh-plugin-zhuzhu-use
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.4.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.4.tgz` 的**绝对路径** |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.4.0.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.4.0.tgz` 的**绝对路径** |
 | **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
@@ -122,7 +122,7 @@ dsh-plugin-zhuzhu-use
 ### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.4.tgz"   # 本地 tgz（本分支根目录）
+npm install ".\dsh-plugin-zhuzhu-use-0.4.0.tgz"   # 本地 tgz（本分支根目录）
 npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
@@ -183,20 +183,12 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Current version `0.3.4`** — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.4 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+**Current version `0.4.0`** — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
 
-**What 0.3.4 changes**
-
-- **Balance now reads the official account service** (`ctx.get('deepseekAccount').getBalance(client)`, installed together with the "Account & balance" page since 0.2.0-rc.2): no API key of your own, and the figures match the official page. The open API with `DEEPSEEK_API_KEY` stays only as the fallback for older shells or a signed-out account.
-- **Usage is merged into the official "Account & balance" page**: current period / today's spend / balance / a link to the official usage page, appended under the official cards with the same card styling (that page exposes no slot, so the plugin mounts nodes it draws itself — the official files are untouched).
-- **Where `/usage` shows up depends on the run state**: while the session is idle the card renders in the conversation as before (the kernel path — the plugin never intercepts the command); while a run is in progress (the card is folded into the running process group and invisible) it opens the settings window on the "Account & balance" page instead. The decision uses the agent state the Host measured at command execution; the client only reads that record.
-- The "View usage" button on that page now targets the usage block in place (opens settings and selects "Account & balance") instead of the embedded Platform view, whose link lives in the usage block.
-- Also: host-side cache plus a warm-up for the card data (numbers appear before the refresh), and the `/usage` display path writes a trace log to `~/.dsh/ds-zhuzhu-use/usage-debug.log`.
-
-**What changed in 0.3.4**
+**What changed in 0.4.0**
 
 - **Balance now reads the built-in account service** (`ctx.get('deepseekAccount').getBalance()`; composed since kernel 0.2.0-rc.2 together with Settings → Account). No personal API key needed, and it matches the official page. The open API + `DEEPSEEK_API_KEY` is only a fallback for the old shell or a signed-out official account.
-- **Usage is merged into the official "Account & balance" page**: current period / today's spend / balance / official usage-page link, drawn as a card that copies the official card's real values (`.5px` `--dsw-alias-settings-card-stroke` border, `--dsw-radius-xl`, `settings-card-fill`, 13px/22px rows of min-height 40px, `.5px` divider) and inserted into that page's own `flex-direction: column; gap: 16px` container, so it sits right under the balance card with identical spacing. The official page exposes no slot, so the block is ours, appended to its content — **no official file is modified**.
+- **Usage is merged into the official "Account & balance" page**: current period / today's spend / balance / official usage-page link, drawn as a card that copies the official card's real values (`.5px` `--dsw-alias-settings-card-stroke` border, `--dsw-radius-xl`, `settings-card-fill`, 13px/22px rows of min-height 40px, `.5px` divider) and anchored right after the official balance card with `insertAdjacentElement('afterend')`, so it shares that column's flex gap and spacing (appending to the page's content container stays only as a fallback when the anchor is missing). The official page exposes no slot, so the block is ours — **no official file is modified**.
 - **`/usage` picks its surface by run state**: when idle the kernel renders the in-conversation card exactly as before (the plugin never intercepts the command); while **running** (where that card sits collapsed inside the running process group and is invisible) the plugin opens Settings on the "Account & balance" page instead. The decision comes from the host measuring `agents.list()` `status === 'running'` at the moment the command executes; the client only reads that record. The card for a run that was handled this way is suppressed by timestamp (±3 s) so it cannot show up twice.
 - The "Query usage" button on that page now lands on the merged block instead of jumping to the embedded platform page (the platform page is still reachable from the block's button).
 - Also: cached usage payload + warm-up at startup (the card paints numbers immediately), and a `~/.dsh/ds-zhuzhu-use/usage-debug.log` trace of the whole `/usage` display path.
@@ -219,8 +211,8 @@ It is published to the npm registry, so the installer fetches it automatically (
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.4.tgz` |
-| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.4.tgz` at the branch root |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.4.0.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.4.0.tgz` at the branch root |
 | **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
 > A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
@@ -228,7 +220,7 @@ It is published to the npm registry, so the installer fetches it automatically (
 **Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.4.tgz"   # local tarball from this branch
+npm install ".\dsh-plugin-zhuzhu-use-0.4.0.tgz"   # local tarball from this branch
 npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
