@@ -595,14 +595,15 @@ window.__ModuleLoader__.load({
 			const w0 = wallets[0] || null;
 			const balanceNum = w0 ? Number(w0.total) : NaN;
 			const balanceCur = w0 && w0.currency ? w0.currency : currency;
-			// 账户那条路的失败原因压成短标签（后端给的是人话，这里只取结论）。
+			// 账户那条路若失败，正文只给「一句话结论」；原始报错（可能是天书）只挂在 title 上，
+			// 免得卡片正面变成调试面板 —— 排查时悬停仍能看到全部细节。
 			const shortAccountNote = (note) => {
 				const t = String(note || "");
 				if (!t) return "";
 				if (/尚未登录|未登录|signed-out/.test(t)) return "账户未登录";
-				if (/没读到官方账户服务|no-account-service/.test(t)) return "账户服务不可用";
-				if (/查询失败|failed/.test(t)) return "账户查询失败";
-				return t.slice(0, 20);
+				if (/没读到官方账户|no-account-service/.test(t)) return "账户不可用";
+				if (/查询失败|not ok|failed/.test(t)) return "账户查询失败";
+				return "账户暂不可用";
 			};
 			const balanceNote = bal && bal.source === "apikey" ? shortAccountNote(bal.accountNote) : "";
 			const balanceSource = bal
@@ -623,8 +624,8 @@ window.__ModuleLoader__.load({
 			const todayTokens = okUsage ? usage.today.tokens : 0;
 			const currency = okUsage && usage.currency ? usage.currency : "CNY";
 
-			const stat = (label, value, sub) =>
-				react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
+			const stat = (label, value, sub, hint) =>
+				react.createElement("div", { title: hint || undefined, style: { display: "flex", flexDirection: "column", gap: 2 } },
 					react.createElement("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary, #888)" } }, label),
 					react.createElement("div", { style: { fontSize: 14, fontWeight: 600, color: "var(--dsw-alias-label-primary, #222)" } }, value),
 					sub ? react.createElement("div", { style: { fontSize: 10, color: "var(--dsw-alias-label-tertiary, #999)" } }, sub) : null
@@ -658,10 +659,11 @@ const cardStyle = {
 				),
 				react.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 14px" } },
 					stat("今日消费", currency + " " + fmtMoney2(todayCost)),
-					stat("余额", Number.isFinite(balanceNum) ? balanceCur + " " + balanceNum.toFixed(2) : balanceSource, balanceSub)
+					stat("余额", Number.isFinite(balanceNum) ? balanceCur + " " + balanceNum.toFixed(2) : balanceSource, balanceSub,
+						bal && bal.accountNote ? "官方账户那条路：" + String(bal.accountNote) + (bal.accountVia ? "（读法：" + bal.accountVia + "）" : "") : undefined)
 				),
 				usage && usage.error
-					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（用量只能来自 platform 登录态：官方账户已登录时会自动复用其会话；这条不通时用量暂不可得，一般不需要手工设置令牌）")
+					? react.createElement("div", { title: String(usage.error), style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量暂不可得：这条只走 platform 登录态（可在上方 ⚙ 粘贴一次，长期有效）。余额不受影响。")
 					: null
 			);
 		}
