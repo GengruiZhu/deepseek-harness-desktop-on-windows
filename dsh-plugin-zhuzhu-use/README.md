@@ -6,7 +6,7 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.3.6`**（npm latest）—— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
+**当前版本 `0.3.7`**（npm latest）—— **0.3.3 的功能 + 宠物修复**。0.3.4 / 0.3.5 / 0.3.6 是在「余额直读官方账户、用量免手工令牌」上的一次失败尝试（官方账户服务在本套内核里读不出余额、官方会话 token 不能用于用量接口），**三个版本已从 npm 撤回**，相关代码全部撤销；只保留其中与宠物有关的三处修复。0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
 
 - **子代理驱动管理**（设置 →「子代理」）：Codex CLI / Claude Code SDK 两个可选 provider 可单独装、单独删（自研 pnpm 驱动、NDJSON 事件流进度、可取消可重试、装完复核三项清单、删除含 `.pnpm` 真内容与孤儿清理）
 - **插件更新管理**：检查更新 / 单个更新 / 全部更新
@@ -14,34 +14,11 @@
 - **宠物按需安装/卸载**：下载进度、取消、卸载
 - 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
 
-**0.3.6 —— 走官方设置页同款的路读账户（`remote.account`），并解决实例没就绪的问题**：
+**0.3.7 保留的三处宠物修复**（源起 0.3.4，量化复现后改的）：
 
-- **余额优先走 Remote BFF**：官方设置页的账户页用的就是 `ctx.remote.account.getBalance()`（返回 `{ ok, value }` 包装），Host 侧同样可读。0.3.4 / 0.3.5 走的是 `deepseekAccount` **服务本体**，而 `reflect.get` 拿到的实例**没 start**，一调用就抛 `Cannot read properties of undefined`（它内部第一句就是 `this.detailsLifetime.signal`）—— 卡片上那行 `（账户：Cannot read properties of …）` 就是它
-- **就绪实例改用 `ctx.inject` 拿**：`ctx.inject(['deepseekAccount'], …)` 在服务可用后回调、服务替换时重跑 —— 这是 cordis 给可选依赖的正路（写进 `export const inject` 会拖住整个插件：web / 自建壳没有这个服务就永远不加载）
-- **失败原因完整可见**：卡片余额副行给结论，**悬停可看完整报错**，并注明是哪条读法失败（`ctx.inject` / `ctx.remote.account` / `ctx.get` / `reflect.get`）
-- `account-probe` 路由同步扩展（RPC 与服务本体各自是否拿到、走哪条路、返回什么）
-- 手工令牌仍是回退 —— **始终不需要用户自己搓**
-
-**0.3.5 —— 修「官方账户那条路没读通」+ 把原因显示出来（不再引导手工搓令牌）**：
-
-- **可选服务的读法改成多路尝试**：`ctx.get('deepseekAccount')` → **`ctx.reflect.get('deepseekAccount', false)`** → 属性代理，逐条独立 `try`。0.3.4 只用了第一条 —— 这是这套内核里「读没在 `inject` 里声明的服务」的已知坑（此前 `pluginManager` 也是换成 `reflect.get` 才读到的）
-- **卡片余额副行会带上账户那条路的结论**：例如 `API Key（账户：账户服务不可用）` / `（账户：账户未登录）` / `（账户：账户查询失败）` —— 一眼看出是没登录、服务没读到、还是查询失败，不必再靠日志
-- 新增只读诊断路由 `GET /api/ds-zhuzhu-use/account-probe`：返回 `ctx.get` / `reflect.get` 是否可用、哪条路读到了服务、`getBalance()` 与 `getPlatformSession()` 的结果
-- **明确「不需要用户手工搓」**：官方账户已登录时用量自动复用其会话；手工令牌降为「进阶，一般用不到」，提示与失败文案都不再让用户去 F12 复制
-- API Key 作为余额来源**保留**（账户那条路不可用时的兜底）
-
-**0.3.4 —— 余额直读官方账户、用量免手工令牌、点徽章随时看卡片**：
-
-- **余额直读官方账户**：改用官方账户服务（`ctx.get('deepseekAccount').getBalance()`，desktop profile 的 base bundle 提供 `@deepseek-ai/dsh-deepseek-account-platform` 这一行）—— 充值 + 赠金钱包按币种合并，**不再依赖 API Key，也不需要任何 platform 操作**；服务缺失 / 未登录 / 查询失败时回退原来的 API Key 路径（两条路各自独立，谁成功用谁）
-- **platform 用量免手工令牌**：优先用官方 `getPlatformSession()`（Host-only 的 origin/token 快照，带 desktop 请求头）去查用量接口，origin 也以官方给的为准；手工粘贴的 `userToken` 降为回退（官方未登录时才需要）
-- **点徽章即可看用量卡片**：时段徽章现在可点击，就地展开 `UsageCard`（走 `/api/ds-zhuzhu-use/usage-card` + 本地渲染，**不经过 composer 提交**）—— 会话跑着的时候也能随时看，不必等这一轮结束再敲 `/usage`；`⚙` 仍单独用于手工令牌
-- 卡片余额区渲染新结构：`币种 总额`，副行 `赠金 x · 充值 y · 来源（官方账户直读 / API Key / 未登录账户）`
-
-**0.3.4 —— 宠物三处「看起来像鬼畜」的 bug（全部有量化复现）**：
-
-- **状态气泡会把整只宠物往下推**：气泡以前是列方向的第一个兄弟，而拖过之后容器按 `top/left` 钉住 —— 于是一冒泡整只宠物就下移 `bubbleH` 像素，状态每变一次（IDLE↔WORKING…）就上下跳一次。改成 `position:absolute` 挂在精灵上方，不再参与布局
-- **注视基准点算错了**：`dy` 一直用「精灵高度的 33%」当脸的位置，而 576×624 的帧里眼睛在 y≈89（**14%**）—— 基准点掉到胸口，和眼睛齐平的光标会被判成在下方，越靠两边越偏成 down-left / down-right。改为 15%，并支持资源用 `gazeFaceY` 覆盖
-- **资源侧**（见 `pets/README.md`）：`pet-assets` 分支上的帧做了一次**锚点重排** —— 原来每帧按自己的包围盒独立归一化，同一段里角色站的位置都不一样（`blink_double` 四帧整体横移 **97px**、`look` 右半边漂 **32px**、`running-*` 漂 **174~197px**），并剔掉了 `sleep/02`、`sleep/03` 上贯穿全高的 3px 邻帧竖条（就是「露出侧边动作的一部分」）。重排后所有段的段内锚点摆幅 ≤ 2px
+- **状态气泡不再把整只宠物往下推**：气泡原来是列方向的第一个兄弟，而拖过之后容器按 `top` 钉住 —— 一冒泡整只宠物就下移 `bubbleH` 像素，状态每变一次就上下跳一次。改成 `position:absolute` 挂在精灵上方，不再参与布局
+- **注视基准点从 33% 改为 15%**：`dy` 原用「精灵高度的 33%」当脸的位置，而 576×624 的帧里眼睛在 y≈89（**14%**）—— 基准点掉到胸口，和眼睛齐平的光标会被判成在下方，越靠两边越偏成 down-left / down-right；现在支持资源用 `gazeFaceY` 覆盖
+- **资源侧**（见 `pets/README.md`）：`pet-assets` 分支上的帧做过一次**锚点重排**（每帧原来按自己的包围盒独立归一化，`blink_double` 四帧整体横移 97px、`look` 右半边漂 32px、`running-*` 漂 174~197px），并剔掉了 `sleep/02`、`sleep/03` 上贯穿全高的 3px 邻帧竖条
 
 > ⚠️ **更名说明**：旧包 [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use)（0.2.0）已弃用，新包为 [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use)。
 > 两者**不能同时安装**（插件行 id 与模块名都变了，同时存在会在 profile 里留下悬空行）。
@@ -133,8 +110,8 @@ dsh-plugin-zhuzhu-use
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.6.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.6.tgz` 的**绝对路径** |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.7.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.7.tgz` 的**绝对路径** |
 | **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
@@ -143,7 +120,7 @@ dsh-plugin-zhuzhu-use
 ### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.6.tgz"   # 本地 tgz（本分支根目录）
+npm install ".\dsh-plugin-zhuzhu-use-0.3.7.tgz"   # 本地 tgz（本分支根目录）
 npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
@@ -204,30 +181,13 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Current version `0.3.6`** (npm latest) — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+**Current version `0.3.7`** (npm latest) — **the 0.3.3 feature set plus the pet fixes**. 0.3.4 / 0.3.5 / 0.3.6 were a failed attempt at "read the balance from the official account and drop the hand-copied usage token" (this kernel's account service cannot read the balance, and the account session token is not the platform usage token); **all three were unpublished from npm** and their code is fully reverted — only the three pet fixes survive. 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
 
-**0.3.6 — reads the account through the same path the official settings page uses (`remote.account`), and fixes the not-yet-started instance:**
+**The three pet fixes kept in 0.3.7** (first made in 0.3.4, each measured before changing):
 
-- **Balance prefers the Remote BFF**: the official account page calls `ctx.remote.account.getBalance()` (returning `{ ok, value }`), which is readable from the Host side too. 0.3.4 / 0.3.5 went through the `deepseekAccount` **service instance**, and the one returned by `reflect.get` was **not started** — calling it throws `Cannot read properties of undefined` (its first statement is `this.detailsLifetime.signal`). That is exactly the `(account: Cannot read properties of …)` line on the card.
-- **The ready instance is obtained via `ctx.inject`**: `ctx.inject(['deepseekAccount'], …)` runs its callback once the service is available and re-runs when it is replaced — the sanctioned cordis path for an optional dependency (declaring it in `export const inject` would hold the whole plugin back: web and self-built shells have no such service and would never load it).
-- **The failure reason is fully visible**: the card's balance sub-line shows the conclusion and its tooltip carries the complete error plus which read path failed (`ctx.inject` / `ctx.remote.account` / `ctx.get` / `reflect.get`).
-- The `account-probe` route reports the RPC and service-instance outcomes separately.
-- The manual token remains a fallback — **the user never has to hand-copy anything**.
-
-**0.3.5 — fixes the official-account path and surfaces the reason (no more hand-copied tokens):**
-
-- **Optional services are now read through several paths**: `ctx.get('deepseekAccount')` → **`ctx.reflect.get('deepseekAccount', false)`** → the property proxy, each in its own `try`. 0.3.4 tried only the first — a known trap in this kernel for services not declared in `inject` (the same fix that made `pluginManager` readable earlier).
-- **The card's balance sub-line now carries the account outcome**: e.g. `API Key (account: service unavailable)`, `(account: signed out)`, `(account: query failed)` — no log digging needed.
-- New read-only probe route `GET /api/ds-zhuzhu-use/account-probe` reports whether `ctx.get` / `reflect.get` work, which path reached the service, and what `getBalance()` / `getPlatformSession()` returned.
-- **Nothing is hand-copied by the user**: usage reuses the official session automatically once the account is signed in; the manual token is now labelled "advanced, rarely needed" and neither the tooltip nor the failure text tells you to open F12.
-- The API-key path stays as the balance fallback.
-
-**0.3.4 — balance straight from the official account, no manual token, clickable badge (plus three pet fixes):**
-
-- **Balance reads the official account directly**: `ctx.get('deepseekAccount').getBalance()` (the desktop base bundle provides `@deepseek-ai/dsh-deepseek-account-platform`) returns recharge and bonus wallets merged per currency — no API key, no platform step. The API-key path stays as a fallback when the service is missing, signed out, or the query fails; the two paths are independent.
-- **Usage no longer needs a hand-pasted token**: the platform usage endpoint prefers the official `getPlatformSession()` Host-only origin/token snapshot (desktop headers included) and takes its origin; a pasted `userToken` is only a fallback now.
-- **The period badge is clickable** and expands `UsageCard` in place through `/api/ds-zhuzhu-use/usage-card` with local rendering — **not through the composer** — so it works while a turn is running instead of waiting to type `/usage`. The gear still opens the manual token box.
-- **Pet fixes** (details in the Chinese section above): the status bubble no longer pushes the sprite down (`position:absolute`), the gaze baseline moved from 33% to 15% of the sprite height (`gazeFaceY` override supported), and the `pet-assets` frames were re-anchored per clip (`look` right half 32px, `blink_double` 97px, `running-*` 174–197px) with neighbor-frame slivers removed — **re-download the pet zips to get the aligned frames**.
+- **The status bubble no longer pushes the sprite down**: it used to be the first sibling in a column while a dragged container is pinned by `top`, so a bubble shifted the whole pet down by `bubbleH` — once per state change. It is now `position:absolute` above the sprite and takes no part in layout.
+- **The gaze baseline moved from 33% to 15%**: `dy` used "33% of the sprite height" as the face position, while in a 576×624 frame the eyes sit at y≈89 (**14%**) — the baseline landed on the chest, so a cursor level with the eyes counted as below and drifted to down-left / down-right near the edges. Resources may override it with `gazeFaceY`.
+- **Asset side** (see `pets/README.md`): the frames on the `pet-assets` branch were re-anchored (each frame used to normalize by its own bounding box — `blink_double` shifted 97px across four frames, the `look` right half 32px, `running-*` 174–197px) and the 3px full-height slivers on `sleep/02` / `sleep/03` were dropped.
 
 > ⚠️ **Rename notice**: the old package [`ds_zhuzhu_use`](https://www.npmjs.com/package/ds_zhuzhu_use) (0.2.0) is deprecated; the new one is [`dsh-plugin-zhuzhu-use`](https://www.npmjs.com/package/dsh-plugin-zhuzhu-use). Do not install both — the plugin row id and the module name both changed, and keeping both leaves a dangling row in the profile.
 
@@ -247,8 +207,8 @@ It is published to the npm registry, so the installer fetches it automatically (
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.6.tgz` |
-| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.6.tgz` at the branch root |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.7.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.7.tgz` at the branch root |
 | **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
 > A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
@@ -256,7 +216,7 @@ It is published to the npm registry, so the installer fetches it automatically (
 **Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.6.tgz"   # local tarball from this branch
+npm install ".\dsh-plugin-zhuzhu-use-0.3.7.tgz"   # local tarball from this branch
 npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
