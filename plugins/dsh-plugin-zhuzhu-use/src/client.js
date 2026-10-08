@@ -81,42 +81,25 @@ window.__ModuleLoader__.load({
 
 		function Badge() {
 			const p = usePeriod();
-			const [showToken, setShowToken] = useState(false);
-			const [tokenDraft, setTokenDraft] = useState("");
-			const [tokenMsg, setTokenMsg] = useState("");
-
-			function saveToken() {
-				const t = (tokenDraft || "").trim();
-				if (!t) { setTokenMsg("令牌为空"); return; }
-				fetch("/api/ds-zhuzhu-use/token", {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ action: "set", token: t })
-				})
-					.then((r) => r.json())
-					.then((d) => {
-						if (d && d.ok) { setTokenMsg("已保存，重启后自动读取（可立即用 /usage 查看用量）"); setTokenDraft(""); }
-						else setTokenMsg(d && d.error ? "保存失败：" + d.error : "保存失败");
-					})
-					.catch(() => setTokenMsg("保存失败（网络）"));
-			}
-
-			function clearToken() {
-				fetch("/api/ds-zhuzhu-use/token", {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ action: "clear" })
-				})
-					.then((r) => r.json())
-					.then((d) => { setTokenMsg(d && d.ok ? "已清除令牌" : "清除失败"); })
-					.catch(() => setTokenMsg("清除失败"));
-			}
-
+			const [fallback, setFallback] = useState(false);
+			// 设置那条路失败时的兜底卡片（见 showUsageFallback）。
+			useEffect(() => {
+				const onFallback = () => setFallback(true);
+				window.addEventListener(USAGE_FALLBACK, onFallback);
+				return () => window.removeEventListener(USAGE_FALLBACK, onFallback);
+			}, []);
+			useEffect(() => {
+				if (!fallback) return undefined;
+				const t = setTimeout(() => setFallback(false), 20000);
+				return () => clearTimeout(t);
+			}, [fallback]);
 			if (!p) return null;
 			const c = COLORS[p.period] || COLORS.valley;
 			const remain = p.nextSwitchMs ? p.nextSwitchMs - p.now : null;
 			const countdown = fmtCountdown(remain);
 			const title = p.name + (p.nextName ? "，" + countdown + p.nextName : "");
+			// 只留这一枚徽章。平台用量令牌的设置挪到「设置 → 通用设置」——
+			// 那是配置，不该长期占着输入框上方。
 			return react.createElement(
 				"div",
 				{ style: { display: "flex", justifyContent: "center", padding: "0 0 2px 0", fontFamily: "inherit", flexDirection: "column", alignItems: "center", gap: "4px" } },
@@ -127,22 +110,9 @@ window.__ModuleLoader__.load({
 						} },
 					react.createElement("span", { style: { width: "6px", height: "6px", borderRadius: "999px", background: c.dot, display: "inline-block", flex: "none" } }),
 					react.createElement("span", null, p.name),
-					p.nextSwitchMs ? react.createElement("span", { style: { opacity: .72 } }, countdown + p.nextName) : null,
-					react.createElement("button", { style: { background: "none", border: "none", color: c.text, cursor: "pointer", fontSize: "12px", padding: "0 0 0 4px", opacity: .75 }, title: "设置平台用量令牌（首次）", onClick: () => setShowToken((s) => !s) }, "⚙")
+					p.nextSwitchMs ? react.createElement("span", { style: { opacity: .72 } }, countdown + p.nextName) : null
 				),
-				showToken
-					? react.createElement(
-							"div",
-							{ style: { fontSize: "11px", color: "var(--dsw-alias-label-secondary, #888)", display: "flex", flexDirection: "column", gap: "4px", alignItems: "center", maxWidth: "360px", textAlign: "center" } },
-							react.createElement("div", null, "平台用量令牌（首次）：登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，复制结果粘贴到下面"),
-							react.createElement("input", { type: "password", value: tokenDraft, onChange: (e) => setTokenDraft(e.target.value), placeholder: "粘贴 userToken……", style: { width: "300px", padding: "3px 6px", fontSize: "11px", borderRadius: "4px", border: "1px solid #555", background: "#222", color: "#eee" } }),
-							react.createElement("div", { style: { display: "flex", gap: "6px" } },
-								react.createElement("button", { onClick: saveToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "保存"),
-								react.createElement("button", { onClick: clearToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "清除")
-							),
-							react.createElement("div", { style: { opacity: .9 } }, tokenMsg)
-						)
-					: null
+				fallback ? react.createElement(UsageDockCard, null) : null
 			);
 		}
 
@@ -545,7 +515,25 @@ window.__ModuleLoader__.load({
 			return x.toLocaleString();
 		}
 
-		function UsageCard() {
+		// /usage 的显示时机：内核把命令结果渲染成会话里的一个节点，而那个节点落在"运行中的过程组"
+		// 里面 —— 过程组折叠着的时候根本看不见，于是看起来就是"非得等它输出完才显示"。
+		//
+		// 规矩：**一条命令都不拦**。命令永远走内核原路执行（所以空闲时那张卡片和以前完全一样，
+		// 也不可能出现"被我们吞掉"）；宿主会在执行 /usage 的那一刻记下"这一下是不是在运行中敲的"，
+		// 客户端只负责轮询这个记录，是运行中的话再把设置开在「用量」页。
+		/** 排查用日志（落到 ~/.dsh/ds-zhuzhu-use/usage-debug.log）。 */
+		function usageLog(message) {
+			try {
+				fetch("/api/ds-zhuzhu-use/log", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ m: String(message) }),
+				}).catch(() => {});
+			} catch (_) { /* 记日志失败不影响功能 */ }
+		}
+
+		/** 卡片和设置页共用的数据源：先用宿主缓存把数字画出来，再拉一次最新的刷新。 */
+		function useUsageData() {
 			const [data, setData] = useState(null);
 			const [err, setErr] = useState("");
 			const [loading, setLoading] = useState(true);
@@ -553,16 +541,40 @@ window.__ModuleLoader__.load({
 			const load = useCallback(() => {
 				setLoading(true);
 				setErr("");
-				fetch("/api/ds-zhuzhu-use/usage-card", { cache: "no-store" })
+				// 先用宿主缓存里的那份把数字画出来（秒出），再拉最新的刷新一遍。
+				fetch("/api/ds-zhuzhu-use/usage-card-cached", { cache: "no-store" })
 					.then((r) => r.json())
-					.then((d) => {
-						if (d && d.ok) setData(d.data);
-						else setErr((d && d.error) || "获取失败");
-					})
-					.catch((e) => setErr("获取失败：" + String(e)))
-					.finally(() => setLoading(false));
+					.then((d) => { if (d && d.ok && d.data) { setData(d.data); setLoading(false); } })
+					.catch(() => {})
+					.then(() => fetch("/api/ds-zhuzhu-use/usage-card", { cache: "no-store" })
+						.then((r) => r.json())
+						.then((d) => {
+							if (d && d.ok) setData(d.data);
+							else setErr((d && d.error) || "获取失败");
+						})
+						.catch((e) => setErr("获取失败：" + String(e)))
+						.finally(() => setLoading(false)));
 			}, []);
 			useEffect(() => { load(); }, [load]);
+			return { data, err, loading, reload: load };
+		}
+
+		function UsageCard(props) {
+			const { data, err, loading, reload: load } = useUsageData();
+			// 运行中敲的那次已经在设置页里显示了（宿主记 busy=true，客户端为它发了 handled 事件）；
+			// 会话里这张卡片就不再重复出现 —— 不然一结束就会"设置页 + 会话卡片"同时摆着。
+			const runTime = props && props.node && typeof props.node.time === "number" ? props.node.time : 0;
+			const [suppressed, setSuppressed] = useState(false);
+			useEffect(() => {
+				if (!runTime) return undefined;
+				const onHandled = (event) => {
+					const at = event && event.detail ? Number(event.detail.at) || 0 : 0;
+					if (at && Math.abs(at - runTime) < 3000) setSuppressed(true);
+				};
+				window.addEventListener(USAGE_HANDLED, onHandled);
+				return () => window.removeEventListener(USAGE_HANDLED, onHandled);
+			}, [runTime]);
+			if (suppressed) return null;
 
 			if (loading) {
 				return react.createElement("div", { style: { border: "1px solid var(--dsw-alias-border-l2, #e5e5e5)", borderRadius: 14, padding: "14px 16px", background: "var(--dsw-alias-bg-layer-1, #fff)" } },
@@ -627,12 +639,448 @@ const cardStyle = {
 					stat("余额", Number.isFinite(balanceNum) ? currency + " " + balanceNum.toFixed(2) : "查询失败")
 				),
 				usage && usage.error
-					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（可重新设置平台令牌）")
+					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（平台令牌在 设置 → 通用设置 里）")
 					: null
 			);
 		}
 
 		// ==================== 通用设置：Usage 显示范围 ====================
+		/**
+		 * 盯宿主记录的"最近一次 /usage 执行"（自己不画任何东西）。
+		 *
+		 * 宿主在执行命令的那一刻就知道 agent 在不在跑，所以这里只是把那个事实读回来：
+		 *   运行中 → 把设置开在「用量」页（内核那张卡片这会儿被折叠在过程组里看不见）；
+		 *   空闲   → 什么都不做，会话里那张卡片就是我们要的效果。
+		 * 首次只对齐基线（不触发），避免一启动就把上次的旧记录当成新事件。
+		 */
+		let seenUsageRunAt = null;
+		function UsageRunWatcher() {
+			useEffect(() => {
+				let stop = false;
+				const tick = () => {
+					fetch("/api/ds-zhuzhu-use/usage-run", { cache: "no-store" })
+						.then((r) => r.json())
+						.then((d) => {
+							if (stop || !d || !d.ok || !d.data) return;
+							const at = Number(d.data.at) || 0;
+							if (seenUsageRunAt === null) { seenUsageRunAt = at; return; }
+							if (at <= seenUsageRunAt) return;
+							seenUsageRunAt = at;
+							usageLog("client: 看到 /usage 执行 at=" + at + " busy=" + d.data.busy);
+							if (d.data.busy === true) {
+								// 这次已经在设置页里显示了 → 通知会话里那张卡片别再重复显示一遍。
+								try { window.dispatchEvent(new CustomEvent(USAGE_HANDLED, { detail: { at } })); } catch (_) {}
+								openUsageSettingsSection();
+							}
+						})
+						.catch(() => {});
+				};
+				tick();
+				const timer = setInterval(tick, 700);
+				return () => { stop = true; clearInterval(timer); };
+			}, []);
+			return null;
+		}
+
+		/**
+		 * 打开设置窗口并落在「账号与余额」页（我们的用量块就挂在那页上）。
+		 *
+		 * 首选官方入口：设置外壳把 store handle 注册在 `sidebar.settings` 这个 slot 的选项里，
+		 * `handle.create().actions.openSection(id)` 就是官方"打开设置并选中某一页"的动作 ——
+		 * 不碰 DOM、不依赖快捷键。
+		 *
+		 * 兜底（拿不到 store 时才走）：设置已开着就点导航里的「账号与余额」；否则点侧栏那个
+		 * 设置 trigger（必须认准：顶栏的「成员」按钮也带 aria-haspopup="dialog"，曾经点错过），
+		 * 再不济发一次 Ctrl+,（只在设置没开时发 —— 它是 toggle，开着会被关掉）。
+		 *
+		 * 谁在什么时候调它：`UsageRunWatcher` 只在宿主记录到"这次 /usage 是在运行中敲的"时调；
+		 * 空闲时内核自己会在会话里渲染那张卡片，这里不插手。
+		 */
+		function openUsageSettingsSection() {
+			const findDialog = () => document.querySelector('[role="dialog"][aria-modal="true"]');
+			// 1) 官方路径（首选）：设置外壳是 `sidebar.settings` 这个 slot 的宿主，它的注册选项里带着
+			//    自己的 store handle；handle.create() 拿到实例后可以直接 `actions.openSection(id)` ——
+			//    "打开设置并选中用量页"一步到位。不碰 DOM、不依赖快捷键，也不用猜哪个按钮是设置。
+			const byShellStore = () => {
+				try {
+					const slots = pluginCtx && typeof pluginCtx.get === "function" ? pluginCtx.get("slots") : null;
+					if (!slots || typeof slots.entriesOfSlot !== "function") { usageLog("client: 拿不到 slots 服务"); return false; }
+					const entries = slots.entriesOfSlot("sidebar.settings");
+					const entry = entries && entries.length ? entries[0] : null;
+					const handle = entry ? ((entry.options && entry.options.store) || entry.store) : null;
+					const instance = handle && typeof handle.create === "function" ? handle.create() : null;
+					const actions = instance && instance.actions ? instance.actions : null;
+					usageLog("client: 设置外壳 entry=" + !!entry + " handle=" + !!handle + " instance=" + !!instance +
+						" openSection=" + !!(actions && typeof actions.openSection === "function"));
+					if (!actions || typeof actions.openSection !== "function") return false;
+					// 用量已经并进「账号与余额」页，所以开的就是官方那一页（我们的块挂在那儿）。
+					actions.openSection("account");
+					return true;
+				} catch (error) {
+					usageLog("client: openSection 路径抛错 " + (error && error.message ? error.message : error));
+					return false;
+				}
+			};
+			// 成功判据：设置对话框出来了 **并且** 我们那块真的挂在「账号与余额」页上。
+			const confirm = () => {
+				let tries = 0;
+				const timer = setInterval(() => {
+					tries += 1;
+					syncAccountBlock();
+					if (findDialog() && accountBlockEl && accountBlockEl.parentNode) {
+						clearInterval(timer);
+						usageLog("client: 设置已开在「账号与余额」，用量块也在");
+						return;
+					}
+					if (tries > 40) {
+						clearInterval(timer);
+						usageLog("client: 2s 内没看到设置/用量块（block=" + !!(accountBlockEl && accountBlockEl.parentNode) + "）");
+						showUsageFallback();
+					}
+				}, 50);
+			};
+			if (byShellStore()) { usageLog("client: 已调用 openSection('account')"); confirm(); return; }
+
+			// 2) 兜底：DOM 触发点 + 快捷键（官方 DOM 变了/拿不到 store 时才走到这儿）。
+			// 兜底路径：设置已经开着就点「账号与余额」那一项。
+			const clickAccountNav = (dialog) => {
+				if (!dialog) return false;
+				const scope = dialog.querySelector("nav") || dialog;
+				const hit = Array.prototype.slice.call(scope.querySelectorAll("button,a,[role='tab'],[role='button']"))
+					.find((el) => {
+						const label = (el.textContent || "").trim();
+						return label === "账号与余额" || label === "Account";
+					});
+				if (!hit) return false;
+				hit.click();
+				return true;
+			};
+
+			const opened = findDialog();
+			if (opened && clickAccountNav(opened)) { usageLog("client: 设置已开着 → 已切到「账号与余额」"); confirm(); return; }
+			usageLog("client: " + (opened ? "设置开着但没找到「账号与余额」项" : "设置没开") + " → 去开设置");
+
+			// 认准设置 trigger：排除「成员」那类团队弹层；再按 aria-label 是不是"设置"、
+			// 有没有 aria-keyshortcuts（Ctrl+,）来挑；实在只剩一个候选才用它。
+			const findSettingsTrigger = () => {
+				const all = Array.prototype.slice.call(document.querySelectorAll('button[aria-haspopup="dialog"]'))
+					.filter((el) => !el.closest("[data-team-action]"));
+				if (all.length === 0) return null;
+				const byName = all.filter((el) => /^(设置|Settings)$/i.test((el.getAttribute("aria-label") || "").trim()));
+				if (byName.length === 1) return byName[0];
+				const byShortcut = all.filter((el) => el.hasAttribute("aria-keyshortcuts"));
+				if (byShortcut.length === 1) return byShortcut[0];
+				return all.length === 1 ? all[0] : null;
+			};
+			let clicked = false;
+			try {
+				const trigger = findSettingsTrigger();
+				if (trigger) { trigger.click(); clicked = true; usageLog("client: 点了设置 trigger"); }
+			} catch (_) { /* 认不准就交给下面的快捷键 */ }
+			// 快捷键是 toggle 语义：**只有在确实没有设置对话框时**才发，免得把已经开着的设置关掉。
+			if (!clicked && !findDialog()) {
+				try {
+					const mac = /Mac|iPhone|iPad/i.test(navigator.userAgent || "");
+					window.dispatchEvent(new KeyboardEvent("keydown", {
+						key: ",", code: "Comma",
+						ctrlKey: !mac, metaKey: mac,
+						bubbles: true, cancelable: true, composed: true,
+					}));
+					usageLog("client: 发了 Ctrl+, 试图打开设置");
+				} catch (_) { /* 键盘也不行，就等下面的轮询 */ }
+			}
+			let tries = 0;
+			const timer = setInterval(() => {
+				tries += 1;
+				const dialog = findDialog();
+				if (dialog && clickAccountNav(dialog)) { clearInterval(timer); confirm(); return; }
+				if (tries > 40) {
+					clearInterval(timer);
+					usageLog("client: 放弃（" + (dialog ? "有设置对话框但没找到「账号与余额」项" : "设置对话框始终没出现") + "）");
+					showUsageFallback();
+				}
+			}, 50);
+		}
+
+		/** 设置里的「用量」页：按其它设置项的样子排（一行一个标签 + 值），不是卡片。 */
+		function UsageSection() {
+			const { data, err, loading } = useUsageData();
+			const row = (label, value, sub) => react.createElement("div", { style: S.row },
+				react.createElement("div", { style: { minWidth: 0 } },
+					react.createElement("div", { style: S.label }, label),
+					sub ? react.createElement("div", { style: S.sub }, sub) : null),
+				react.createElement("div", { style: S.value }, value));
+
+			if (loading && !data) return react.createElement("div", { style: S.sub }, "读取中…");
+			if (!data) return react.createElement("div", { style: S.sub }, err || "读取失败");
+			const p = data.period || {};
+			const progress = data.progress || null;
+			const bal = data.balance && data.balance.ok ? data.balance.data : null;
+			const balInfo = bal && bal.balance_infos && bal.balance_infos[0] ? bal.balance_infos[0] : null;
+			const usage = data.usage;
+			const okUsage = usage && !usage.error;
+			const currency = (okUsage && usage.currency) || "CNY";
+			const peak = (progress ? progress.current : p.period) === "peak";
+			const nextName = progress ? (progress.next === "peak" ? "梁文峰" : "梁文谷") : (p.nextName || "");
+			const countdown = p.nextSwitchMs ? fmtCountdown(p.nextSwitchMs - p.now) : "";
+
+			return react.createElement("div", null,
+				// 注意：fmtCountdown 自己就带"…后转"，这里别再补一个（上一版就重复成了"后转后转"）。
+				row("当前时段", (peak ? "梁文峰" : "梁文谷") + (nextName && countdown ? " · " + countdown + nextName : "")),
+				row("今日消费", okUsage ? currency + " " + fmtMoney2(usage.today.cost) : "未设置平台令牌"),
+				row("余额", balInfo ? currency + " " + fmtMoney2(balInfo.total_balance) : "读取失败"),
+				react.createElement("div", { style: S.row },
+					react.createElement("div", { style: { minWidth: 0 } },
+						react.createElement("div", { style: S.label }, "官方用量页"),
+						react.createElement("div", { style: S.sub }, "完整账单、按 API Key / 模型拆分都在官网")),
+					react.createElement("a", {
+						href: "https://platform.deepseek.com/usage", target: "_blank", rel: "noreferrer",
+						style: { fontSize: 13, color: "var(--dsw-alias-label-primary, #333)" },
+					}, "打开")),
+				err ? react.createElement("div", { style: { ...S.sub, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, err) : null);
+		}
+
+		// ==================== 把用量并进官方「账号与余额」页 ====================
+		// 官方那一页没给任何插槽（它的 settings.section 注册没声明 children），所以只能把一块自己画的
+		// 节点挂到它的内容区尾部：官方文件一个字节不改、官方页照常工作，我们只是在它下面多一段。
+		let accountBlockEl = null;
+		let accountBlockValues = null;
+		let accountBlockData = null;
+		let accountBlockFetching = false;
+
+		/** 设置外壳的 store 实例（带 actions / getSnapshot / subscribe）。 */
+		function settingsShellInstance() {
+			try {
+				const slots = pluginCtx && typeof pluginCtx.get === "function" ? pluginCtx.get("slots") : null;
+				if (!slots || typeof slots.entriesOfSlot !== "function") return null;
+				const entries = slots.entriesOfSlot("sidebar.settings");
+				const entry = entries && entries.length ? entries[0] : null;
+				const handle = entry ? ((entry.options && entry.options.store) || entry.store) : null;
+				if (!handle || typeof handle.create !== "function") return null;
+				const instance = handle.create();
+				return instance && instance.actions ? instance : null;
+			} catch (_) { return null; }
+		}
+
+		/**
+		 * 找官方那一列里的「充值余额」卡片 —— 我们的块要插在它**后面**。
+		 *
+		 * 别用 nav.nextElementSibling：那拿到的是内容区外壳，里面是多列布局，append 进去
+		 * 我们就成了"右边的另一列"，块跑到内容区右上角（截图里那坨）。改成认官方卡片当锚点：
+		 * 按标签文本找到最内层节点 → 向上找带圆角、够宽够高的卡片容器 →
+		 * insertAdjacentElement("afterend")，位置就稳在余额卡片正下方、同一列里。
+		 */
+		function officialBalanceCard() {
+			const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+			if (!dialog) return null;
+			const labels = /^(充值余额|赠金余额|Recharge balance|Bonus balance)$/;
+			const nodes = dialog.querySelectorAll("span,div,p,label,h1,h2,h3");
+			let found = null;
+			for (const el of nodes) {
+				if (el.children.length > 0) continue;
+				if (!labels.test((el.textContent || "").trim())) continue;
+				let node = el;
+				while (node && node !== dialog) {
+					const style = getComputedStyle(node);
+					const radius = parseFloat(style.borderRadius) || 0;
+					if (radius >= 6 && node.clientWidth > 160 && node.clientHeight > 40) { found = node; break; }
+					node = node.parentElement;
+				}
+			}
+			// 取文档顺序里最靠下的那张官方卡片：两个标签其实在同一张卡里也没关系，
+			// 我们的块始终挂在官方卡片组的下面。
+			return found;
+		}
+
+		/** 兜底：内容区外壳（锚点找不到时才用）。 */
+		function accountSectionHost() {
+			const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+			if (!dialog) return null;
+			const nav = dialog.querySelector("nav");
+			const host = nav && nav.nextElementSibling ? nav.nextElementSibling : null;
+			// 内容还没渲染出来就等下一轮，别把块挂到一个空壳/别的地方去（评审提的加固）。
+			if (!host || host.childElementCount === 0) return null;
+			return host;
+		}
+
+		function accountEl(tag, style, text) {
+			const el = document.createElement(tag);
+			if (style) Object.assign(el.style, style);
+			if (text !== undefined && text !== null) el.textContent = text;
+			return el;
+		}
+
+		/**
+		 * 画我们的那块。样式**照抄官方那张余额卡的真实取值**（从它的 CSS 模块里挖出来的）：
+		 *   card  : border .5px var(--dsw-alias-settings-card-stroke) / radius var(--dsw-radius-xl)
+		 *           / background var(--dsw-alias-settings-card-fill) / padding 12px 16px
+		 *   row   : flex / space-between / gap 16px / min-height 40px / padding 6px 0
+		 *   divider: border-top .5px var(--dsw-alias-border-l2)
+		 *  次要文字: var(--dsw-alias-label-tertiary)
+		 */
+		function buildAccountBlock() {
+			const cardStyle = {
+				border: "0.5px solid var(--dsw-alias-settings-card-stroke, #e6e6e6)",
+				borderRadius: "var(--dsw-radius-xl, 12px)",
+				background: "var(--dsw-alias-settings-card-fill, #fff)",
+				padding: "12px 16px",
+				display: "flex", flexDirection: "column", gap: "8px",
+				boxSizing: "border-box", fontSize: "13px", lineHeight: "22px",
+				color: "var(--dsw-alias-label-primary, #333)",
+			};
+			const rowStyle = {
+				display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px",
+				boxSizing: "border-box", minHeight: "40px", padding: "6px 0",
+			};
+			const dividerStyle = { borderTop: "0.5px solid var(--dsw-alias-border-l2, #eee)" };
+			const box = accountEl("div", cardStyle);
+
+			const row = (label, value, options) => {
+				const wrap = accountEl("div", rowStyle);
+				wrap.appendChild(accountEl("span", { color: (options && options.strong) ? "inherit" : "var(--dsw-alias-label-tertiary, #999)" }, label));
+				const cell = accountEl("span", { textAlign: "right", minWidth: "0" }, value || "读取中…");
+				wrap.appendChild(cell);
+				box.appendChild(wrap);
+				return cell;
+			};
+
+			// 标题行：跟官方「充值余额」那一行同款（左标签 + 右侧值）
+			const values = {};
+			values.period = row("当前时段", "读取中…", { strong: true });
+			box.appendChild(accountEl("div", dividerStyle));
+			values.cost = row("今日消费");
+			values.balance = row("余额");
+			box.appendChild(accountEl("div", dividerStyle));
+
+			// 最后一行：左边「更多」占位 + 右边官方同款描边按钮，和官方余额卡收尾一致
+			const moreRow = accountEl("div", rowStyle);
+			moreRow.appendChild(accountEl("span", { color: "var(--dsw-alias-label-tertiary, #999)" }, "更多"));
+			const actions = accountEl("div", { display: "flex", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: "10px" });
+			const link = accountEl("a", {
+				boxSizing: "border-box",
+				border: "0.5px solid var(--dsw-alias-border-l3, #ddd)",
+				borderRadius: "var(--dsw-radius-md, 8px)",
+				whiteSpace: "nowrap", minWidth: "58px", height: "36px",
+				color: "var(--dsw-alias-label-primary, #333)", flex: "none",
+				display: "inline-flex", justifyContent: "center", alignItems: "center",
+				padding: "0 14px", fontSize: "14px", lineHeight: "22px", textDecoration: "none",
+			}, "官方用量页");
+			link.href = "https://platform.deepseek.com/usage";
+			link.target = "_blank";
+			link.rel = "noreferrer";
+			actions.appendChild(link);
+			moreRow.appendChild(actions);
+			box.appendChild(moreRow);
+			accountBlockValues = values;
+			return box;
+		}
+
+		function fillAccountBlock() {
+			if (!accountBlockValues) return;
+			const data = accountBlockData;
+			if (!data) { return; }
+			const p = data.period || {};
+			const progress = data.progress || null;
+			const peak = (progress ? progress.current : p.period) === "peak";
+			const nextName = progress ? (progress.next === "peak" ? "梁文峰" : "梁文谷") : (p.nextName || "");
+			const countdown = p.nextSwitchMs ? fmtCountdown(p.nextSwitchMs - p.now) : "";
+			const bal = data.balance && data.balance.ok ? data.balance.data : null;
+			const info = bal && bal.balance_infos && bal.balance_infos[0] ? bal.balance_infos[0] : null;
+			const usage = data.usage;
+			const okUsage = usage && !usage.error;
+			const currency = (okUsage && usage.currency) || "CNY";
+			accountBlockValues.period.textContent = (peak ? "梁文峰" : "梁文谷") + (nextName && countdown ? " · " + countdown + nextName : "");
+			accountBlockValues.cost.textContent = okUsage ? currency + " " + fmtMoney2(usage.today.cost) : "未设置平台令牌";
+			accountBlockValues.balance.textContent = info ? currency + " " + fmtMoney2(info.total_balance) : "读取失败";
+		}
+
+		function refreshAccountBlockData() {
+			if (accountBlockFetching) return;
+			accountBlockFetching = true;
+			fetch("/api/ds-zhuzhu-use/usage-card-cached", { cache: "no-store" })
+				.then((r) => r.json())
+				.then((d) => { if (d && d.ok && d.data) { accountBlockData = d.data; fillAccountBlock(); } })
+				.catch(() => {})
+				.then(() => fetch("/api/ds-zhuzhu-use/usage-card", { cache: "no-store" })
+					.then((r) => r.json())
+					.then((d) => { if (d && d.ok) { accountBlockData = d.data; fillAccountBlock(); } })
+					.catch(() => {})
+					.finally(() => { accountBlockFetching = false; }));
+		}
+
+		function removeAccountBlock() {
+			if (accountBlockEl && accountBlockEl.parentNode) accountBlockEl.parentNode.removeChild(accountBlockEl);
+			accountBlockEl = null;
+			accountBlockValues = null;
+		}
+
+		/** 每次同步：该显示就挂上（并刷新数据），不该显示就摘掉。 */
+		function syncAccountBlock() {
+			try {
+				const instance = settingsShellInstance();
+				let state = null;
+				try { state = instance && typeof instance.getSnapshot === "function" ? instance.getSnapshot() : null; } catch (_) { state = null; }
+				if (!state || !state.open || state.activeId !== "account") { removeAccountBlock(); return false; }
+				// 首选：以官方「充值余额」卡片为锚点，插到它正后方 —— 同一列、共用父容器的
+				// flex gap，所以位置和间距都跟官方卡片一致，也不受内容区多列布局影响。
+				const card = officialBalanceCard();
+				if (card && card.parentNode) {
+					if (!accountBlockEl) accountBlockEl = buildAccountBlock();
+					if (accountBlockEl.parentNode !== card.parentNode || accountBlockEl.previousElementSibling !== card) {
+						card.insertAdjacentElement("afterend", accountBlockEl);
+					}
+					fillAccountBlock();
+					if (!accountBlockData) refreshAccountBlockData();
+					return true;
+				}
+				// 兜底：官方那一页的内容容器（锚点没找到时才用）。
+				const host = accountSectionHost();
+				if (!host) return false;
+				if (!accountBlockEl) accountBlockEl = buildAccountBlock();
+				// 挂进官方那一页自己的内容里（它是 flex 列、gap 16px）——这样我们的卡片就紧跟在
+				// 「充值余额」下面、间距和其它卡片一致；挂在内容区末尾会飞到底部去。
+				const sectionRoot = host.firstElementChild && host.firstElementChild.appendChild ? host.firstElementChild : host;
+				if (accountBlockEl.parentNode !== sectionRoot) sectionRoot.appendChild(accountBlockEl);
+				fillAccountBlock();
+				if (!accountBlockData) refreshAccountBlockData();
+				return true;
+			} catch (_) { return false; }
+		}
+
+		/** 管理器：跟着设置外壳的 store 走（开关、切页都会触发），再挂个轻量定时器兜住 DOM 渲染时序。 */
+		function AccountUsageMerger() {
+			useEffect(() => {
+				let unsubscribe = null;
+				try {
+					const instance = settingsShellInstance();
+					if (instance && typeof instance.subscribe === "function") unsubscribe = instance.subscribe(() => syncAccountBlock());
+				} catch (_) { /* 订阅不到就靠定时器 */ }
+				const timer = setInterval(syncAccountBlock, 500);
+				syncAccountBlock();
+				return () => {
+					clearInterval(timer);
+					if (typeof unsubscribe === "function") unsubscribe();
+					removeAccountBlock();
+				};
+			}, []);
+			return null;
+		}
+
+		const USAGE_FALLBACK = "ds-zhuzhu-usage:fallback";
+		/** 运行中那次 /usage 已经由设置页显示 —— 会话里那张卡片收到这个就自己不显示。 */
+		const USAGE_HANDLED = "ds-zhuzhu-usage:handled";
+		// 兜底：万一把设置开出来这一步失败（官方 DOM 变了之类），至少让用量在输入框上方露出来，
+		// 而不是"什么都没发生"。只在失败时出现，20 秒后自己收掉。
+		function showUsageFallback() {
+			try { window.dispatchEvent(new CustomEvent(USAGE_FALLBACK)); } catch (_) { /* 没人听就算了 */ }
+		}
+		function UsageDockCard() {
+			return react.createElement("div", {
+				style: { maxWidth: 420, width: "100%", border: "1px solid var(--dsw-alias-border-l2, #e6e6e6)",
+					borderRadius: 10, padding: "2px 12px 8px", background: "var(--dsw-alias-bg-layer-1, #fff)" },
+			}, react.createElement(UsageSection, null));
+		}
+
 		// 平台用量的真实维度是 (API Key × 模型)，这里选一个口径存到宿主侧，
 		// /usage 卡片和 /usage 指令共用同一份设置。
 		function UsageScopeRow() {
@@ -699,6 +1147,84 @@ const cardStyle = {
 
 
 		// ==================== 左侧栏：工作区 / Chat 两个入口 ====================
+		/**
+		 * 平台用量令牌（今日消费 / 趋势 / 按模型明细靠它；余额走官方账号服务，不需要令牌）。
+		 *
+		 * 这套东西原来挂在输入框上方（徽章旁边），一直占着聊天框的位置。它是配置，不是常用操作，
+		 * 所以搬进「设置 → 通用设置」：平时只是一行状态，点「设置 / 更换」才展开粘贴框。
+		 */
+		function PlatformTokenRow() {
+			const [has, setHas] = useState(null);
+			const [draft, setDraft] = useState("");
+			const [msg, setMsg] = useState("");
+			const [open, setOpen] = useState(false);
+			const [busy, setBusy] = useState(false);
+
+			const load = useCallback(() => fetch("/api/ds-zhuzhu-use/token-state", { cache: "no-store" })
+				.then((r) => r.json())
+				.then((d) => { if (d && d.ok) setHas(!!(d.data && d.data.hasToken)); })
+				.catch(() => {}), []);
+			useEffect(() => { load(); }, [load]);
+
+			function save() {
+				const t = (draft || "").trim();
+				if (!t) { setMsg("令牌为空"); return; }
+				setBusy(true);
+				setMsg("");
+				fetch("/api/ds-zhuzhu-use/token", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ action: "set", token: t }),
+				})
+					.then((r) => r.json())
+					.then((d) => {
+						if (d && d.ok) { setMsg("已保存"); setDraft(""); setOpen(false); setHas(true); }
+						else setMsg((d && d.error) || "保存失败");
+					})
+					.catch(() => setMsg("保存失败（网络）"))
+					.finally(() => setBusy(false));
+			}
+
+			function clear() {
+				setBusy(true);
+				setMsg("");
+				fetch("/api/ds-zhuzhu-use/token", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ action: "clear" }),
+				})
+					.then((r) => r.json())
+					.then(() => { setMsg("已清除"); setHas(false); })
+					.catch(() => setMsg("清除失败"))
+					.finally(() => setBusy(false));
+			}
+
+			return react.createElement("div", { style: { ...S.row, flexDirection: "column", alignItems: "stretch", gap: "6px" } },
+				react.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" } },
+					react.createElement("div", { style: { minWidth: 0 } },
+						react.createElement("div", { style: S.label }, "平台用量令牌"),
+						react.createElement("div", { style: S.sub }, has === null ? "读取中…" : (has ? "已设置 —— 今日消费 / 趋势 / 按模型明细用它查询" : "未设置 —— 只显示余额，不显示今日消费")),
+						msg ? react.createElement("div", { style: S.sub }, msg) : null
+					),
+					react.createElement("div", { style: { display: "flex", gap: "6px", flex: "none" } },
+						react.createElement("button", { style: S.btn, disabled: busy, onClick: () => setOpen((v) => !v) }, has ? "更换" : "设置"),
+						has ? react.createElement("button", { style: S.btn, disabled: busy, onClick: clear }, "清除") : null
+					)
+				),
+				open
+					? react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+						react.createElement("div", { style: S.sub }, "登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，把结果粘到这里"),
+						react.createElement("input", {
+							type: "password", value: draft, placeholder: "粘贴 userToken……",
+							onChange: (e) => setDraft(e.target.value),
+							style: { ...S.select, width: "100%" },
+						}),
+						react.createElement("div", null,
+							react.createElement("button", { style: S.btnPrimary, disabled: busy, onClick: save }, "保存")))
+					: null
+			);
+		}
+
 		// 官方 sidebar.panellist 是「全局面板登记表」：列表项的 id 就是 main 插槽的 key。
 		// conversation 是内核保留的 key（原本的 agent 工作区），chat 是我们新加的纯聊天面板。
 		const CHAT_URL = "https://chat.deepseek.com/";
@@ -3900,6 +4426,35 @@ function PetsSection() {
 				}, UsageCard)
 			);
 
+			// 不再拦 /usage（拦下来就得自己再执行一遍，中间任何一步失败都变成"没反应"）。
+			// 现在只由 UsageRunWatcher 读宿主记录：运行中敲的 → 去开设置里的「用量」页。
+
+			// 「账号与余额」里那个「查询用量」原本跳到内嵌的 Platform 页面（那边只按官方口径显示余额）。
+			// 点它改成直接开我们这块面板：消费 / 余额 / 峰谷 / 明细一次看到；官方页在面板右上角留了入口。
+			// 只在设置对话框里的那个按钮上生效，别的按钮一概不碰。
+			const onSettingsUsageClick = (event) => {
+				try {
+					const target = event.target;
+					if (!target || typeof target.closest !== "function") return;
+					const hit = target.closest("a,button");
+					if (!hit) return;
+					const text = (hit.textContent || "").trim();
+					if (text !== "查询用量" && text !== "View usage") return;
+					if (!hit.closest('[role="dialog"]')) return;
+					event.preventDefault();
+					event.stopPropagation();
+					openUsageSettingsSection();
+				} catch (_) { /* 拦不到就照旧走官方行为 */ }
+			};
+			document.addEventListener("click", onSettingsUsageClick, true);
+			// 评审提的：插件被停用/重载时把这一个监听摘掉，免得越挂越多（重复触发 + 轻微泄漏）。
+			try {
+				if (typeof ctx.effect === "function") {
+					ctx.effect(() => () => document.removeEventListener("click", onSettingsUsageClick, true),
+						"ds_zhuzhu_use: 查询用量 点击拦截");
+				}
+			} catch (_) { /* 摘不掉也只是多留一个空转的监听，不影响功能 */ }
+
 			ctx.slots.inject("settings.section", () =>
 				ctx.slots.register({
 					name: "settings.section",
@@ -3914,6 +4469,17 @@ function PetsSection() {
 			// 插件更新不再占设置分区：入口挪到「插件」页（“添加插件”左边那个按钮），面板走 shell.overlay。
 			ctx.slots.inject("shell.overlay", () =>
 				ctx.slots.register({ name: "shell.overlay", id: "ds_zhuzhu_use-plugin-update", order: 70 }, PluginUpdateOverlay)
+			);
+
+			// 盯宿主记录的 /usage 执行（自己不画东西，只在"运行中敲的"那次去开设置页）。
+			ctx.slots.inject("shell.overlay", () =>
+				ctx.slots.register({ name: "shell.overlay", id: "ds_zhuzhu_use-usage-run", order: 71 }, UsageRunWatcher)
+			);
+
+			// 「用量」已经并进官方那页（AccountUsageMerger 挂在「账号与余额」内容区尾部），
+			// 所以不再单独占一个导航项。
+			ctx.slots.inject("shell.overlay", () =>
+				ctx.slots.register({ name: "shell.overlay", id: "ds_zhuzhu_use-account-usage", order: 72 }, AccountUsageMerger)
 			);
 
 			// 「软件信息」已下线：转向官方桌面端之后版本/反馈/更新都由官方自己管，
@@ -4003,6 +4569,11 @@ dpRegister({ id: PV_SLIDES, extensions: ["pptx", "ppt"], priority: "extension", 
 
 			ctx.slots.inject("settings.general.item", () =>
 				ctx.slots.register({ name: "settings.general.item", id: "ds_zhuzhu_use-usage-scope", order: 50 }, guarded(UsageScopeRow))
+			);
+
+			// 平台用量令牌的设置入口（从输入框上方挪过来的）。
+			ctx.slots.inject("settings.general.item", () =>
+				ctx.slots.register({ name: "settings.general.item", id: "ds_zhuzhu_use-platform-token", order: 51 }, guarded(PlatformTokenRow))
 			);
 
 			// 侧栏的「检查更新」入口也下线：它查的是我们仓库的 release（0.9.x 那套）。

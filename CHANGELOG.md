@@ -2,6 +2,16 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
+## 插件 dsh-plugin-zhuzhu-use 0.3.4 (2026-10-08)
+
+**余额直读官方账号服务；用量并进官方「账号与余额」页；`/usage` 按运行状态分流显示。**
+
+- **余额**：改读官方账号服务 `ctx.get('deepseekAccount').getBalance(client)` —— 要害是**必须传调用方身份**（`{ version, locale, timezoneOffsetSeconds }`，官方用它拼 `x-client-*` 请求头）；不传就会在它内部读 `client.version` 时抛 `Cannot read properties of undefined (reading 'version')`（0.3.5 / 0.3.6 一直卡在这个 TypeError 上，还误判成"服务没读到 / 实例没就绪"）。返回结构映射回 `balance_infos`，卡片与 `/usage` 文本不用动；老外壳或官方账号未登录时回退开放 API + `DEEPSEEK_API_KEY`
+- **用量并进官方页**：官方「账号与余额」页**不开放子插槽**（`AccountSection.tsx` 没有 `renderSlot`），所以插件自己画节点挂上去 —— 以官方「充值余额」卡片为锚点 `insertAdjacentElement("afterend")` 插到它正后方（用 `nav.nextElementSibling` 会挂进内容区外壳，变成"另一列"跑到右上角）；样式取官方卡片真实取值（`--dsw-alias-settings-card-stroke/fill`、`--dsw-radius-xl`、0.5px 描边、`min-height:40px`）
+- **`/usage` 显示分流**：宿主在执行命令那一刻实测 `agentBusy` 并记下 `lastUsageRun`，客户端 700ms 轮询只读这个事实 —— 空闲照旧渲染会话卡片，运行中则打开设置并切到「账号与余额」页；**插件不拦命令**（拦下来就得自己再执行一遍，中间任何一步失败都变成"没反应"）
+- 设置跳转走官方能力：`slots.entriesOfSlot('sidebar.settings')` → store handle → `actions.openSection('account')`；失败退 DOM / `Ctrl+,`，再失败在输入框上方出兜底卡片
+- 顺手：卡片数据宿主缓存 + 启动预热（点开先出数字再刷新）；排查日志写到 `~/.dsh/ds-zhuzhu-use/usage-debug.log`
+
 ## 0.9.2-rc1 (2026-09-24)
 
 **内核升级 0.1.6-alpha.2 → 0.1.7-rc.1 + Office 修好 + 「装完打不开」修好 + 进程生命周期收尾**（活跃补丁 4 → **7 个**）。
