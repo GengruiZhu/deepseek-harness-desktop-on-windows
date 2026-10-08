@@ -2,6 +2,17 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
+## 插件 dsh-plugin-zhuzhu-use 0.3.6 (2026-10-08)
+
+**能用的部分保留并做干净：余额自动、点徽章看卡片；官方账户那条路修不了的部分不再摆到脸上。**
+
+- **点徽章即可看用量卡片**：时段徽章可点击 → 就地展开 `UsageCard`（走 `/api/ds-zhuzhu-use/usage-card` + 本地渲染，**不经过 composer 提交**），会话正在跑的时候也能随时看，不必等这一轮结束再敲 `/usage`
+- **余额自动显示**：优先直读官方账户（充值 + 赠金钱包按币种合并）；账户那条路不可用时回退 API Key —— 两条路各自独立，**都不需要用户手工操作**
+- **官方账户服务已能正确读到**：`ctx.get` 读不到、`reflect.get` 拿到的是没 start 的实例（调用即 `Cannot read properties of undefined`）；正路是 **`ctx.inject(['deepseekAccount'], cb)`** —— 服务就绪后回调。探针实测：`svcVia: "ctx.inject"`、`platformSession: "ok(https://platform.deepseek.com)"`
+- **已知限制（官方内核侧，插件改不了）**：`getBalance()` 在运行期会抛 `Cannot read properties of undefined (reading 'version')` —— 定位到 `getDetail()` 里 try 之外的 `readCurrentGrant()`；同一函数在 `getPlatformSession()` 里却正常，即**凭据读取时好时坏**。另外官方会话 token 不能用于 platform 用量接口（那是网页会话 userToken），所以**用量仍需在 ⚙ 里粘一次**（长期有效），余额不受影响
+- **卡片不再显示内部报错**：正文只给一句话结论（如「API Key（账户：账户暂不可用）」），原始报错移到悬停提示里
+- **另修（profile 侧，与版本无关）**：profile `cordis.patch.yml` 里那条插件行与 bundle patch 重复（官方插件管理器写入的启用行），会让客户端加载两份、卡片渲染成**两张** —— 该行已移除，只保留 bundle patch 的一份
+
 ## 插件 dsh-plugin-zhuzhu-use 0.3.4 (2026-09-29)
 
 **余额改为直读官方账户；用量不必再手工粘贴令牌；点徽章即可随时看用量卡片。**

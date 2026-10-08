@@ -3090,50 +3090,90 @@ async function getApiKey(ctx) {
 }
 
 /**
- * 官方账户服务（可选）。desktop profile 的 base bundle 提供这一行
- * （`@deepseek-ai/dsh-deepseek-account-platform`）；web 与自建壳没有它。
+ * 官方账户的两条路，都是可选的（web / 自建壳没有）：
  *
- * 三条读法都试：`ctx.get` 是官方 AGENTS.md 给可选服务的写法；`ctx.reflect.get(name, false)`
- * 是这套内核里实测能读到"没在 inject 里声明"的服务的写法（第二个参数 false = 找不到就返回
- * undefined 而不是抛错）；属性代理 `ctx.<name>` 跟拓扑走，放最后兜底。
- * 每条都单独 try —— 某一条抛错不该挡住下一条。
- * @returns `{ svc, via }`：`svc` 是服务实例或 undefined，`via` 记下是哪条路成功的（诊断用）。
+ * 1. `remote.account` —— Remote BFF 命名空间，**官方设置页的账户页走的就是它**
+ *    （`ctx.remote.account.getBalance()` → `{ ok, value }`），Host 侧同样可读。
+ * 2. `deepseekAccount` 服务本体 —— 只有它能给 `getPlatformSession()`（platform 会话快照），
+ *    但**必须已经就绪**：没 start 的实例一调用就抛 `Cannot read properties of undefined`
+ *    （它内部第一句就是 `this.detailsLifetime.signal`）。就绪实例由 apply 里的
+ *    `ctx.inject(['deepseekAccount'], …)` 回调填进来 —— 那才是 cordis 给可选依赖的正路。
+ *
+ * 每条读法单独 try，任一条拿到就用；`via` 记下是哪条（诊断用）。
  */
-function accountService(ctx) {
-  const attempts = [
-    ['ctx.get', () => (typeof ctx.get === 'function' ? ctx.get('deepseekAccount') : undefined)],
-    ['ctx.reflect.get', () => (ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('deepseekAccount', false) : undefined)],
-    ['ctx.deepseekAccount', () => ctx.deepseekAccount],
-  ]
-  for (const [via, read] of attempts) {
-    try {
-      const svc = read()
-      if (svc && typeof svc.getBalance === 'function') return { svc, via }
-    } catch (_) { /* 换下一条 */ }
+let readyAccount = null
+
+function accountClients(ctx) {
+  const out = { rpc: null, rpcVia: null, svc: readyAccount, svcVia: readyAccount ? 'ctx.inject' : null }
+  if (!out.svc) {
+    for (const [via, read] of [
+      ['ctx.get', () => (typeof ctx.get === 'function' ? ctx.get('deepseekAccount') : undefined)],
+      ['ctx.reflect.get', () => (ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('deepseekAccount', false) : undefined)],
+      ['ctx.deepseekAccount', () => ctx.deepseekAccount],
+    ]) {
+      try { const s = read(); if (s && typeof s.getBalance === 'function') { out.svc = s; out.svcVia = via; break } } catch (_) { /* 换下一条 */ }
+    }
   }
-  return { svc: undefined, via: null }
+  for (const [via, read] of [
+    ['ctx.remote.account', () => (ctx.remote ? ctx.remote.account : undefined)],
+    ['ctx.get(remote.account)', () => (typeof ctx.get === 'function' ? ctx.get('remote.account') : undefined)],
+    ['ctx.reflect.get(remote.account)', () => (ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('remote.account', false) : undefined)],
+  ]) {
+    try { const c = read(); if (c && typeof c.getBalance === 'function') { out.rpc = c; out.rpcVia = via; break } } catch (_) { /* 换下一条 */ }
+  }
+  return out
 }
 
-/**
- * 账户路径诊断（只读，不改任何状态）。卡片在回退到 API Key 时会带上简短原因，
- * 这样"为什么没用官方账户"能直接看出来，不必再靠日志。
- */
+/** `AccountDetails['balance']` → 统一钱包结构；不是 ready 就返回 null。 */
+function walletsFromDetails(details, via) {
+  if (!details || details.status !== 'ready') return null
+  const collect = (list) => {
+    const out = new Map()
+    for (const w of list || []) {
+      const currency = String((w && w.currency) || 'CNY')
+      out.set(currency, String((w && w.balance) != null ? w.balance : '0'))
+    }
+    return out
+  }
+  const recharge = collect(details.value)
+  const bonus = collect(details.bonusWallets)
+  const wallets = [...new Set([...recharge.keys(), ...bonus.keys()])].map((currency) => {
+    const r = recharge.has(currency) ? toNum(recharge.get(currency)) : NaN
+    const b = bonus.has(currency) ? toNum(bonus.get(currency)) : NaN
+    return {
+      currency,
+      recharge: recharge.has(currency) ? recharge.get(currency) : null,
+      bonus: bonus.has(currency) ? bonus.get(currency) : null,
+      total: String((Number.isFinite(r) ? r : 0) + (Number.isFinite(b) ? b : 0)),
+    }
+  })
+  if (!wallets.length) return null
+  return { ok: true, source: 'account', wallets, via }
+}
+
+/** 账户路径诊断（只读，不改任何状态）。 */
 export async function accountProbe(ctx) {
-  const out = { hasGet: typeof ctx.get === 'function', hasReflect: !!(ctx.reflect && typeof ctx.reflect.get === 'function'), via: null, service: false, balance: null, platformSession: null }
-  const { svc, via } = accountService(ctx)
-  out.via = via
-  out.service = !!svc
-  if (!svc) return out
-  try {
-    const b = await svc.getBalance()
-    out.balance = b === null ? 'null(signed-out)' : (b && b.status) || 'unknown'
-  } catch (e) { out.balance = 'throw:' + String((e && e.message) || e) }
-  try {
-    if (typeof svc.getPlatformSession === 'function') {
+  const { rpc, rpcVia, svc, svcVia } = accountClients(ctx)
+  const out = {
+    hasGet: typeof ctx.get === 'function',
+    hasReflect: !!(ctx.reflect && typeof ctx.reflect.get === 'function'),
+    rpc: !!rpc, rpcVia, svc: !!svc, svcVia,
+    balance: null, platformSession: null,
+  }
+  if (rpc) {
+    try {
+      const r = await rpc.getBalance()
+      out.balance = r && r.ok === false ? 'rpc-not-ok' : 'ok'
+    } catch (e) { out.balance = 'throw:' + String((e && e.message) || e) }
+  }
+  if (svc && typeof svc.getPlatformSession === 'function') {
+    try {
       const s = await svc.getPlatformSession()
       out.platformSession = s && s.token ? 'ok(' + String(s.origin || '') + ')' : 'null'
-    } else { out.platformSession = 'method-missing' }
-  } catch (e) { out.platformSession = 'throw:' + String((e && e.message) || e) }
+    } catch (e) { out.platformSession = 'throw:' + String((e && e.message) || e) }
+  } else if (svc) {
+    out.platformSession = 'method-missing'
+  }
   return out
 }
 
@@ -3142,37 +3182,32 @@ export async function accountProbe(ctx) {
  * @returns `{ ok: true, source: 'account', wallets }`；未登录时 `{ ok: false, signedOut: true }`。
  */
 async function accountWallets(ctx) {
-  const { svc, via } = accountService(ctx)
-  if (!svc) return { ok: false, error: 'no-account-service', message: '没读到官方账户服务（ctx.get / reflect.get 都没拿到）' }
-  try {
-    const res = await svc.getBalance()
-    if (!res) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户', via }
-    if (res.status !== 'ready') return { ok: false, error: 'account-failed', message: '账户余额查询失败', via }
-    const collect = (list) => {
-      const out = new Map()
-      for (const w of list || []) {
-        const currency = String((w && w.currency) || 'CNY')
-        out.set(currency, String((w && w.balance) != null ? w.balance : '0'))
-      }
-      return out
-    }
-    const recharge = collect(res.value)
-    const bonus = collect(res.bonusWallets)
-    const wallets = [...new Set([...recharge.keys(), ...bonus.keys()])].map((currency) => {
-      const r = recharge.has(currency) ? toNum(recharge.get(currency)) : NaN
-      const b = bonus.has(currency) ? toNum(bonus.get(currency)) : NaN
-      return {
-        currency,
-        recharge: recharge.has(currency) ? recharge.get(currency) : null,
-        bonus: bonus.has(currency) ? bonus.get(currency) : null,
-        total: String((Number.isFinite(r) ? r : 0) + (Number.isFinite(b) ? b : 0)),
-      }
-    })
-    if (!wallets.length) return { ok: false, error: 'empty', message: '账户暂无余额信息', via }
-    return { ok: true, source: 'account', wallets, via }
-  } catch (err) {
-    return { ok: false, error: 'account-failed', message: String((err && err.message) || err), via }
+  const { rpc, rpcVia, svc, svcVia } = accountClients(ctx)
+  // 1) Remote BFF —— 官方设置页同款，最稳；返回 `{ ok, value }`
+  if (rpc) {
+    try {
+      const r = await rpc.getBalance()
+      if (r && r.ok === false) return { ok: false, error: 'account-failed', message: '账户余额查询失败（remote.account 返回 not ok）', via: rpcVia }
+      const details = r && typeof r === 'object' && 'value' in r ? r.value : r
+      const viaRpc = walletsFromDetails(details, rpcVia)
+      if (viaRpc) return viaRpc
+      if (!details) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户', via: rpcVia }
+      return { ok: false, error: 'account-failed', message: '账户余额不可用（' + (details.status || 'empty') + '）', via: rpcVia }
+    } catch (_) { /* 落到服务本体 */ }
   }
+  // 2) 服务本体（只有已就绪的实例才敢调用）
+  if (svc) {
+    try {
+      const res = await svc.getBalance()
+      if (!res) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户', via: svcVia }
+      const viaSvc = walletsFromDetails(res, svcVia)
+      if (viaSvc) return viaSvc
+      return { ok: false, error: 'account-failed', message: '账户余额不可用（' + (res.status || 'empty') + '）', via: svcVia }
+    } catch (err) {
+      return { ok: false, error: 'account-failed', message: String((err && err.message) || err), via: svcVia }
+    }
+  }
+  return { ok: false, error: 'no-account-service', message: '没读到官方账户（remote.account 与 deepseekAccount 都没拿到）' }
 }
 
 /**
@@ -3296,18 +3331,18 @@ const NO_TOKEN_MSG =
  * @returns `{ token, origin, headers, source: 'account' | 'manual' }`，两者都没有时为 null。
  */
 async function platformCredential(ctx) {
-  const { svc, via } = accountService(ctx)
+  const { svc, svcVia } = accountClients(ctx)
   if (svc && typeof svc.getPlatformSession === 'function') {
     try {
       const s = await svc.getPlatformSession()
       if (s && s.token) {
         const origin = String(s.origin || '').replace(/\/+$/, '') || PLATFORM_ORIGIN
-        return { token: String(s.token), origin, headers: s.requestHeaders || {}, source: 'account', via }
+        return { token: String(s.token), origin, headers: s.requestHeaders || {}, source: 'account', via: svcVia }
       }
     } catch (_) { /* 拿不到就走下一步 */ }
   }
   const manual = readToken()
-  if (manual) return { token: manual, origin: PLATFORM_ORIGIN, headers: {}, source: 'manual', via }
+  if (manual) return { token: manual, origin: PLATFORM_ORIGIN, headers: {}, source: 'manual', via: svcVia }
   return null
 }
 
@@ -3726,6 +3761,17 @@ function explainText() {
 }
 
 export function apply(ctx, config = {}) {
+  // 可选依赖：账户服务**就绪后**把实例存下来。这是 cordis 给可选依赖的正路 ——
+  // 写进 export const inject 会拖住整个插件（web / 自建壳没有这个服务就永远不加载），
+  // 而 reflect.get 拿到的可能是没 start 的实例（一调用就 TypeError）。
+  // 服务替换/重启时回调会重跑，所以引用跟着更新。
+  try {
+    ctx.inject(['deepseekAccount'], (scoped) => {
+      const svc = scoped.deepseekAccount
+      readyAccount = svc
+      return () => { if (readyAccount === svc) readyAccount = null }
+    })
+  } catch (_) { /* 没有 ctx.inject 的旧内核：忽略，读服务那几条路仍然会兜 */ }
   ctx.effect(() => {
     petEnsureTimer(ctx)
     // 官方安装器的阶段事件（我们只在 requestId 对得上时采用，别的安装与我们无关）。
