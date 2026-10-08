@@ -16,7 +16,13 @@
  *   - POST /api/dsh-about/rollback      同上（回退，保留旧入口）
  *   - GET  /api/dsh-about/update-state  下载/启动进度
  *
- * 余额用开放 API（api.deepseek.com/user/balance，凭据 DEEPSEEK_API_KEY）。
+ * 余额优先读官方内置账号服务（ctx.get('deepseekAccount')，0.2.0-rc.2 起随「账号与余额」
+ * 一起装）—— 用户不必自备 API Key，口径也和官方页面一致；老外壳或官方账号没登录时，
+ * 退回开放 API（api.deepseek.com/user/balance + 凭据 DEEPSEEK_API_KEY）。
+ *
+ * /usage 卡片：内核把它渲染在会话的"运行中的过程组"里，过程组折叠时看不见，
+ * 所以客户端另外挂了一张即时浮层（见 client.js 的 UsageFloatingCard）。
+ *
  * 用量（每个模型当日消费/趋势）DeepSeek 开放 API 不提供，只在 platform 登录态
  * 暴露（platform.deepseek.com/api/v0/usage/by_api_key/{cost,amount}），且必须用
  * 网页控制台会话令牌（localStorage.userToken），不是 sk- API Key。因此 "首次登录"
@@ -200,6 +206,15 @@ export const __drivers = {
   orphans: () => profileOrphans(),
   short: (p) => shortPath(p),
   state: () => drvState(),
+}
+
+/**
+ * 离线自检入口（余额那条路）：给一个假的账号服务，检查映射出来的形状对不对
+ * —— 内核在跑的时候没法从外面调 `deepseekAccount`，所以映射逻辑只能这样验。
+ */
+export const __usage = {
+  officialBalance: (account) => officialBalance({ get: (name) => (name === 'deepseekAccount' ? account : undefined) }),
+  cached: () => usageCardCache,
 }
 
 // ==================== 插件更新（官方插件页只给装/停/删，没有"更新"） ====================
@@ -2974,6 +2989,42 @@ function openInExplorer(targetPath) {
 }
 
 // ---- Usage 富卡片数据（供客户端 commandview 渲染）----
+/**
+ * 有没有 agent 正在跑（客户端决定"运行中开设置页 / 空闲看卡片"用的）。
+ * 返回 true / false，问不到（没有 agents 服务、或这个内核的 agent 不带 status 字段）返回 null，
+ * 让客户端退回"看会话卡片有没有挂载"的兜底判断，而不是当成空闲把功能静默关掉。
+ */
+function agentBusy(ctx) {
+  try {
+    const agents = ctx && typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    if (!agents || typeof agents.list !== 'function') return null
+    const list = Array.from(agents.list() || [])
+    if (list.length === 0) return false
+    if (list.every((a) => !a || typeof a.status !== 'string')) return null
+    return list.some((a) => a && a.status === 'running')
+  } catch (_) { return null }
+}
+
+/**
+ * 最近一次 /usage 命令是什么时候执行的、执行那一刻 agent 在不在跑。
+ * 客户端据此决定"要不要把设置窗口开在「用量」页"——注意这是**宿主实测**的，
+ * 不是客户端轮询猜的，也不依赖客户端能不能拦住那条命令。
+ */
+let lastUsageRun = { at: 0, busy: null }
+
+/** /usage 显示路径的排查日志（只追加，很小）。 */
+function usageDebug(line) {
+  try {
+    const dir = join(dshHome(), 'ds-zhuzhu-use')
+    mkdirSync(dir, { recursive: true })
+    appendFileSync(join(dir, 'usage-debug.log'), new Date().toISOString() + '  ' + line + '\n')
+  } catch (_) { /* 记日志失败不影响功能 */ }
+}
+
+// 卡片数据会缓存一份：客户端先用缓存把卡片画出来（点 /usage 不再盯着"正在获取用量…"），
+// 再拉一次最新的把数字刷新掉。启动 5 秒后预热一次，所以第一次点也是秒出。
+let usageCardCache = { at: 0, data: null }
+
 async function usageCardPayload(ctx) {
   const token = readToken()
   const scope = readScope()
@@ -2990,7 +3041,9 @@ async function usageCardPayload(ctx) {
     })(),
     Promise.resolve(periodProgress()),
   ])
-  return { period, balance, usage, progress, hasToken: !!token, scope }
+  const data = { period, balance, usage, progress, hasToken: !!token, scope }
+  usageCardCache = { at: Date.now(), data }
+  return data
 }
 
 // 范围下拉的选项：真实存在的 API Key 名与模型 id。10 分钟内复用一次抓取结果。
@@ -3086,9 +3139,60 @@ async function getApiKey(ctx) {
   } catch (_) { return null }
 }
 
+/**
+ * 官方内核自带的账号服务（`ctx.get('deepseekAccount')`，0.2.0-rc.2 起随「账号与余额」页一起装）。
+ *
+ * 余额本来要拿用户自己的 API Key 去打 api.deepseek.com/user/balance；官方已经有登录态和余额查询，
+ * 直接读它就行 —— 用户不用再配 Key，口径也和官方页面一致。
+ * 返回结构换成开放 API 的形状（`balance_infos`），这样卡片和 /usage 文本一个字都不用改。
+ */
+async function officialBalance(ctx) {
+  let account = null
+  try { account = ctx && typeof ctx.get === 'function' ? ctx.get('deepseekAccount') : undefined } catch (_) { return null }
+  if (!account || typeof account.getBalance !== 'function') return null
+  // 官方这边的账户查询要一份"调用方身份"（它会把这三项拼成 Platform 的 x-client-* 请求头）。
+  const client = {
+    version: kernelRuntimeVersion() || '0.0.0',
+    locale: (() => { try { return String(Intl.DateTimeFormat().resolvedOptions().locale || 'zh-CN') } catch (_) { return 'zh-CN' } })(),
+    // 时区偏移按官方约定"东为正"，单位是秒（北京 = 28800）。
+    timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+  }
+  let res = null
+  try { res = await account.getBalance(client) } catch (e) {
+    return { ok: false, error: 'official-failed', message: (e && e.message) ? e.message : String(e) }
+  }
+  if (res === null || res === undefined) return { ok: false, error: 'official-signed-out', message: '官方账号未登录' }
+  if (res.status !== 'ready') return { ok: false, error: 'official-failed', message: '官方账号读取余额失败' }
+  const normal = Array.isArray(res.value) ? res.value : []
+  const bonus = Array.isArray(res.bonusWallets) ? res.bonusWallets : []
+  const byCurrency = new Map()
+  const add = (list, field) => {
+    for (const w of list) {
+      const currency = String((w && w.currency) || 'CNY')
+      const row = byCurrency.get(currency) || { currency, topped: 0, granted: 0 }
+      row[field] += toNum(w && w.balance) || 0
+      byCurrency.set(currency, row)
+    }
+  }
+  add(normal, 'topped')
+  add(bonus, 'granted')
+  const infos = [...byCurrency.values()].map((c) => ({
+    currency: c.currency,
+    total_balance: (c.topped + c.granted).toFixed(2),
+    granted_balance: c.granted.toFixed(2),
+    topped_up_balance: c.topped.toFixed(2),
+  }))
+  if (!infos.length) return { ok: false, error: 'official-empty', message: '官方账号没有余额信息' }
+  return { ok: true, data: { is_available: true, balance_infos: infos }, source: 'official' }
+}
+
 async function fetchBalance(ctx) {
+  // 1) 官方账号服务优先（用户不用自备 API Key）
+  const official = await officialBalance(ctx)
+  if (official) return official
+  // 2) 兜底：开放 API + 凭据里的 DEEPSEEK_API_KEY（老外壳，或官方账号没登录）
   const key = await getApiKey(ctx)
-  if (!key) return { ok: false, error: 'no-key', message: '未找到 DeepSeek API Key' }
+  if (!key) return { ok: false, error: 'no-key', message: '官方账号未登录，也没找到 DeepSeek API Key' }
   try {
     const res = await fetch('https://api.deepseek.com/user/balance', {
       headers: { authorization: 'Bearer ' + key },
@@ -3600,6 +3704,9 @@ export function apply(ctx, config = {}) {
     if (typeof offInstallState === 'function') ctx.effect(() => offInstallState)
     // 官方更新会把 app.asar 换回原样 → 这里每次启动都补一遍（已补过就是一次 stat，几乎无成本）。
     asarPatchStatus = ensurePersistentBrowserProfile()
+    // 启动 5 秒后预热一次卡片缓存（best-effort）：这样第一次点 /usage 也是秒出。
+    const warmTimer = setTimeout(() => { usageCardPayload(ctx).catch(() => {}) }, 5000)
+    if (warmTimer && typeof warmTimer.unref === 'function') warmTimer.unref()
     const disposers = [
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/asar-patch', () => ({ ok: true, data: asarPatchStatus }))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/period', () => periodPayload())),
@@ -3730,6 +3837,29 @@ export function apply(ctx, config = {}) {
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/usage-card', () =>
         usageCardPayload(ctx).then((data) => ({ ok: true, data }))
       )),
+      // 缓存版：秒回上一次的结果，客户端拿它先把卡片画出来，再打上面那条刷新。
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/usage-card-cached', () => (
+        usageCardCache.data
+          ? { ok: true, data: usageCardCache.data, cachedAt: usageCardCache.at }
+          : { ok: false, error: 'no-cache' }
+      ))),
+      // 平台令牌有没有设置（设置页那一行只需要知道这个）
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/token-state', () => ({
+        ok: true, data: { hasToken: !!readToken() },
+      }))),
+      // 有没有 agent 在跑（客户端据此决定 /usage 是开设置页还是照旧走会话卡片）
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/agent-busy', () => ({
+        ok: true, data: { busy: agentBusy(ctx) },
+      }))),
+      // 最近一次 /usage 是什么时候执行的、那一刻在不在跑（客户端轮询它来决定要不要开设置页）
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/usage-run', () => ({
+        ok: true, data: lastUsageRun,
+      }))),
+      // 客户端排查日志（落到 ~/.dsh/ds-zhuzhu-use/usage-debug.log）
+      ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/log', (body) => {
+        usageDebug('client: ' + String((body && body.m) || ''))
+        return { ok: true }
+      })),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/token', (body) => {
         if (body && body.action === 'set') {
           const t = body && typeof body.token === 'string' ? body.token.trim() : ''
@@ -3807,7 +3937,12 @@ export function apply(ctx, config = {}) {
   safeRegisterCommand(ctx, {
     name: 'usage',
     description: '查询 DeepSeek 账户余额、今日/近期用量与当前峰谷时段',
-    handler: () => usageText(ctx).then((text) => ({ kind: 'success', text })),
+    handler: () => {
+      // 在执行这一刻记下"是不是在运行中敲的"：客户端只读这个事实，不拦命令。
+      lastUsageRun = { at: Date.now(), busy: agentBusy(ctx) }
+      usageDebug('/usage 执行 busy=' + lastUsageRun.busy)
+      return usageText(ctx).then((text) => ({ kind: 'success', text }))
+    },
   })
 
   // 宠物系统命令：agent 也能读它的状态（系统层，外观与动画不在这里）。
