@@ -3092,13 +3092,49 @@ async function getApiKey(ctx) {
 /**
  * 官方账户服务（可选）。desktop profile 的 base bundle 提供这一行
  * （`@deepseek-ai/dsh-deepseek-account-platform`）；web 与自建壳没有它。
- * 可选服务用 `ctx.get(name)` 读全局服务 —— `ctx.<name>` 属性代理跟拓扑走，这里不合适。
+ *
+ * 三条读法都试：`ctx.get` 是官方 AGENTS.md 给可选服务的写法；`ctx.reflect.get(name, false)`
+ * 是这套内核里实测能读到"没在 inject 里声明"的服务的写法（第二个参数 false = 找不到就返回
+ * undefined 而不是抛错）；属性代理 `ctx.<name>` 跟拓扑走，放最后兜底。
+ * 每条都单独 try —— 某一条抛错不该挡住下一条。
+ * @returns `{ svc, via }`：`svc` 是服务实例或 undefined，`via` 记下是哪条路成功的（诊断用）。
  */
 function accountService(ctx) {
+  const attempts = [
+    ['ctx.get', () => (typeof ctx.get === 'function' ? ctx.get('deepseekAccount') : undefined)],
+    ['ctx.reflect.get', () => (ctx.reflect && typeof ctx.reflect.get === 'function' ? ctx.reflect.get('deepseekAccount', false) : undefined)],
+    ['ctx.deepseekAccount', () => ctx.deepseekAccount],
+  ]
+  for (const [via, read] of attempts) {
+    try {
+      const svc = read()
+      if (svc && typeof svc.getBalance === 'function') return { svc, via }
+    } catch (_) { /* 换下一条 */ }
+  }
+  return { svc: undefined, via: null }
+}
+
+/**
+ * 账户路径诊断（只读，不改任何状态）。卡片在回退到 API Key 时会带上简短原因，
+ * 这样"为什么没用官方账户"能直接看出来，不必再靠日志。
+ */
+export async function accountProbe(ctx) {
+  const out = { hasGet: typeof ctx.get === 'function', hasReflect: !!(ctx.reflect && typeof ctx.reflect.get === 'function'), via: null, service: false, balance: null, platformSession: null }
+  const { svc, via } = accountService(ctx)
+  out.via = via
+  out.service = !!svc
+  if (!svc) return out
   try {
-    const svc = typeof ctx.get === 'function' ? ctx.get('deepseekAccount') : undefined
-    return svc && typeof svc.getBalance === 'function' ? svc : undefined
-  } catch (_) { return undefined }
+    const b = await svc.getBalance()
+    out.balance = b === null ? 'null(signed-out)' : (b && b.status) || 'unknown'
+  } catch (e) { out.balance = 'throw:' + String((e && e.message) || e) }
+  try {
+    if (typeof svc.getPlatformSession === 'function') {
+      const s = await svc.getPlatformSession()
+      out.platformSession = s && s.token ? 'ok(' + String(s.origin || '') + ')' : 'null'
+    } else { out.platformSession = 'method-missing' }
+  } catch (e) { out.platformSession = 'throw:' + String((e && e.message) || e) }
+  return out
 }
 
 /**
@@ -3106,12 +3142,12 @@ function accountService(ctx) {
  * @returns `{ ok: true, source: 'account', wallets }`；未登录时 `{ ok: false, signedOut: true }`。
  */
 async function accountWallets(ctx) {
-  const svc = accountService(ctx)
-  if (!svc) return { ok: false, error: 'no-account-service', message: '当前外壳没有官方账户服务' }
+  const { svc, via } = accountService(ctx)
+  if (!svc) return { ok: false, error: 'no-account-service', message: '没读到官方账户服务（ctx.get / reflect.get 都没拿到）' }
   try {
     const res = await svc.getBalance()
-    if (!res) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户' }
-    if (res.status !== 'ready') return { ok: false, error: 'account-failed', message: '账户余额查询失败' }
+    if (!res) return { ok: false, signedOut: true, error: 'signed-out', message: '尚未登录 DeepSeek 账户', via }
+    if (res.status !== 'ready') return { ok: false, error: 'account-failed', message: '账户余额查询失败', via }
     const collect = (list) => {
       const out = new Map()
       for (const w of list || []) {
@@ -3132,10 +3168,10 @@ async function accountWallets(ctx) {
         total: String((Number.isFinite(r) ? r : 0) + (Number.isFinite(b) ? b : 0)),
       }
     })
-    if (!wallets.length) return { ok: false, error: 'empty', message: '账户暂无余额信息' }
-    return { ok: true, source: 'account', wallets }
+    if (!wallets.length) return { ok: false, error: 'empty', message: '账户暂无余额信息', via }
+    return { ok: true, source: 'account', wallets, via }
   } catch (err) {
-    return { ok: false, error: 'account-failed', message: String((err && err.message) || err) }
+    return { ok: false, error: 'account-failed', message: String((err && err.message) || err), via }
   }
 }
 
@@ -3171,7 +3207,8 @@ async function fetchBalance(ctx) {
       total: b.total_balance != null ? String(b.total_balance) : null,
     }))
     if (!wallets.length) return { ok: false, error: 'empty', message: '账户暂无余额信息' }
-    return { ok: true, source: 'apikey', wallets }
+    // 记下"为什么没用官方账户" —— 卡片副行会带上，用户一眼能看出是没登录、服务读不到、还是查询失败。
+    return { ok: true, source: 'apikey', wallets, accountNote: viaAccount.message || viaAccount.error, accountVia: viaAccount.via || null }
   } catch (err) {
     return { ok: false, error: 'fetch-failed', message: String((err && err.message) || err) }
   }
@@ -3259,18 +3296,18 @@ const NO_TOKEN_MSG =
  * @returns `{ token, origin, headers, source: 'account' | 'manual' }`，两者都没有时为 null。
  */
 async function platformCredential(ctx) {
-  const svc = accountService(ctx)
+  const { svc, via } = accountService(ctx)
   if (svc && typeof svc.getPlatformSession === 'function') {
     try {
       const s = await svc.getPlatformSession()
       if (s && s.token) {
         const origin = String(s.origin || '').replace(/\/+$/, '') || PLATFORM_ORIGIN
-        return { token: String(s.token), origin, headers: s.requestHeaders || {}, source: 'account' }
+        return { token: String(s.token), origin, headers: s.requestHeaders || {}, source: 'account', via }
       }
-    } catch (_) { /* 拿不到就回退手工令牌 */ }
+    } catch (_) { /* 拿不到就走下一步 */ }
   }
   const manual = readToken()
-  if (manual) return { token: manual, origin: PLATFORM_ORIGIN, headers: {}, source: 'manual' }
+  if (manual) return { token: manual, origin: PLATFORM_ORIGIN, headers: {}, source: 'manual', via }
   return null
 }
 
@@ -3705,6 +3742,7 @@ export function apply(ctx, config = {}) {
     asarPatchStatus = ensurePersistentBrowserProfile()
     const disposers = [
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/asar-patch', () => ({ ok: true, data: asarPatchStatus }))),
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/account-probe', () => accountProbe(ctx).then((data) => ({ ok: true, data })))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/period', () => periodPayload())),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/balance', () => fetchBalance(ctx))),
       ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/usage', () => {

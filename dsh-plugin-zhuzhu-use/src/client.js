@@ -137,7 +137,7 @@ window.__ModuleLoader__.load({
 					? react.createElement(
 							"div",
 							{ style: { fontSize: "11px", color: "var(--dsw-alias-label-secondary, #888)", display: "flex", flexDirection: "column", gap: "4px", alignItems: "center", maxWidth: "360px", textAlign: "center" } },
-							react.createElement("div", null, "平台用量令牌（可选手工回退）：桌面版已登录 DeepSeek 账户时会自动复用官方会话，这里不用填；仅当没有官方登录态时才需要 —— 登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，复制结果粘贴到下面"),
+							react.createElement("div", null, "平台用量令牌（进阶，一般用不到）：桌面版已登录 DeepSeek 账户时会**自动**复用官方会话，正常情况下这里不需要填任何东西。只有官方登录态不可用、而你又确实想看到用量明细时，才需要手工粘一次 —— 登录 platform.deepseek.com/usage → F12 → 控制台执行 JSON.parse(localStorage.getItem(\"userToken\")).value，把结果粘贴到下面"),
 							react.createElement("input", { type: "password", value: tokenDraft, onChange: (e) => setTokenDraft(e.target.value), placeholder: "粘贴 userToken……", style: { width: "300px", padding: "3px 6px", fontSize: "11px", borderRadius: "4px", border: "1px solid #555", background: "#222", color: "#eee" } }),
 							react.createElement("div", { style: { display: "flex", gap: "6px" } },
 								react.createElement("button", { onClick: saveToken, style: { fontSize: "11px", padding: "2px 8px", cursor: "pointer" } }, "保存"),
@@ -595,8 +595,20 @@ window.__ModuleLoader__.load({
 			const w0 = wallets[0] || null;
 			const balanceNum = w0 ? Number(w0.total) : NaN;
 			const balanceCur = w0 && w0.currency ? w0.currency : currency;
+			// 账户那条路的失败原因压成短标签（后端给的是人话，这里只取结论）。
+			const shortAccountNote = (note) => {
+				const t = String(note || "");
+				if (!t) return "";
+				if (/尚未登录|未登录|signed-out/.test(t)) return "账户未登录";
+				if (/没读到官方账户服务|no-account-service/.test(t)) return "账户服务不可用";
+				if (/查询失败|failed/.test(t)) return "账户查询失败";
+				return t.slice(0, 20);
+			};
+			const balanceNote = bal && bal.source === "apikey" ? shortAccountNote(bal.accountNote) : "";
 			const balanceSource = bal
-				? (bal.source === "account" ? "官方账户直读" : "API Key")
+				? (bal.source === "account"
+						? "官方账户直读"
+						: (balanceNote ? "API Key（账户：" + balanceNote + "）" : "API Key"))
 				: ((data.balance && data.balance.signedOut) ? "未登录账户" : "查询失败");
 			const balanceSub = w0
 				? [
@@ -649,7 +661,7 @@ const cardStyle = {
 					stat("余额", Number.isFinite(balanceNum) ? balanceCur + " " + balanceNum.toFixed(2) : balanceSource, balanceSub)
 				),
 				usage && usage.error
-					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（已登录官方账户时会自动复用其会话；否则可在上方 ⚙ 里手工设置平台令牌）")
+					? react.createElement("div", { style: { marginTop: 10, fontSize: 10, color: "var(--dsw-alias-state-error-primary, #dc2626)" } }, "用量查询失败：" + usage.error + "（用量只能来自 platform 登录态：官方账户已登录时会自动复用其会话；这条不通时用量暂不可得，一般不需要手工设置令牌）")
 					: null
 			);
 		}

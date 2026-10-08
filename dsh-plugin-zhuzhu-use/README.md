@@ -6,13 +6,21 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.3.4`**（npm latest）—— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
+**当前版本 `0.3.5`**（npm latest）—— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
 
 - **子代理驱动管理**（设置 →「子代理」）：Codex CLI / Claude Code SDK 两个可选 provider 可单独装、单独删（自研 pnpm 驱动、NDJSON 事件流进度、可取消可重试、装完复核三项清单、删除含 `.pnpm` 真内容与孤儿清理）
 - **插件更新管理**：检查更新 / 单个更新 / 全部更新
 - **Agent 预设修复**：内核升级改名后一键修 profile 里的旧行
 - **宠物按需安装/卸载**：下载进度、取消、卸载
 - 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
+
+**0.3.5 —— 修「官方账户那条路没读通」+ 把原因显示出来（不再引导手工搓令牌）**：
+
+- **可选服务的读法改成多路尝试**：`ctx.get('deepseekAccount')` → **`ctx.reflect.get('deepseekAccount', false)`** → 属性代理，逐条独立 `try`。0.3.4 只用了第一条 —— 这是这套内核里「读没在 `inject` 里声明的服务」的已知坑（此前 `pluginManager` 也是换成 `reflect.get` 才读到的）
+- **卡片余额副行会带上账户那条路的结论**：例如 `API Key（账户：账户服务不可用）` / `（账户：账户未登录）` / `（账户：账户查询失败）` —— 一眼看出是没登录、服务没读到、还是查询失败，不必再靠日志
+- 新增只读诊断路由 `GET /api/ds-zhuzhu-use/account-probe`：返回 `ctx.get` / `reflect.get` 是否可用、哪条路读到了服务、`getBalance()` 与 `getPlatformSession()` 的结果
+- **明确「不需要用户手工搓」**：官方账户已登录时用量自动复用其会话；手工令牌降为「进阶，一般用不到」，提示与失败文案都不再让用户去 F12 复制
+- API Key 作为余额来源**保留**（账户那条路不可用时的兜底）
 
 **0.3.4 —— 余额直读官方账户、用量免手工令牌、点徽章随时看卡片**：
 
@@ -117,8 +125,8 @@ dsh-plugin-zhuzhu-use
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.4.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.4.tgz` 的**绝对路径** |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.5.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.3.5.tgz` 的**绝对路径** |
 | **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
@@ -127,7 +135,7 @@ dsh-plugin-zhuzhu-use
 ### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.4.tgz"   # 本地 tgz（本分支根目录）
+npm install ".\dsh-plugin-zhuzhu-use-0.3.5.tgz"   # 本地 tgz（本分支根目录）
 npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
@@ -188,7 +196,15 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Current version `0.3.4`** (npm latest) — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+**Current version `0.3.5`** (npm latest) — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+
+**0.3.5 — fixes the official-account path and surfaces the reason (no more hand-copied tokens):**
+
+- **Optional services are now read through several paths**: `ctx.get('deepseekAccount')` → **`ctx.reflect.get('deepseekAccount', false)`** → the property proxy, each in its own `try`. 0.3.4 tried only the first — a known trap in this kernel for services not declared in `inject` (the same fix that made `pluginManager` readable earlier).
+- **The card's balance sub-line now carries the account outcome**: e.g. `API Key (account: service unavailable)`, `(account: signed out)`, `(account: query failed)` — no log digging needed.
+- New read-only probe route `GET /api/ds-zhuzhu-use/account-probe` reports whether `ctx.get` / `reflect.get` work, which path reached the service, and what `getBalance()` / `getPlatformSession()` returned.
+- **Nothing is hand-copied by the user**: usage reuses the official session automatically once the account is signed in; the manual token is now labelled "advanced, rarely needed" and neither the tooltip nor the failure text tells you to open F12.
+- The API-key path stays as the balance fallback.
 
 **0.3.4 — balance straight from the official account, no manual token, clickable badge (plus three pet fixes):**
 
@@ -215,8 +231,8 @@ It is published to the npm registry, so the installer fetches it automatically (
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.4.tgz` |
-| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.4.tgz` at the branch root |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.3.5.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.3.5.tgz` at the branch root |
 | **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
 > A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
@@ -224,7 +240,7 @@ It is published to the npm registry, so the installer fetches it automatically (
 **Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.3.4.tgz"   # local tarball from this branch
+npm install ".\dsh-plugin-zhuzhu-use-0.3.5.tgz"   # local tarball from this branch
 npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
