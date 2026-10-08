@@ -2622,7 +2622,6 @@ function PetOverlay() {
   const [sleeping, setSleeping] = useState(false);   // 长时间没动静 -> 打盹
   const [stroll, setStroll] = useState(null);        // 溜达中 {x0,x1,y,t0,dur}
   const boxRef = useRef(null);
-  const faceRef = useRef(null);             // 主宠物精灵本体的 DOM（注视基准要用它，不是整个容器）
   const dragRef = useRef(null);
   const pressRef = useRef(null);            // 长按计时器
   const reactRef = useRef(null);            // 互动反应的复位计时器
@@ -2747,11 +2746,10 @@ function PetOverlay() {
   // 注视光标：算出「宠物 -> 光标」的方位，挑 16 个朝向帧里的一个。
   // 角度约定跟 look-directions.png 的标签一致：0° 正上，顺时针（90°右 / 180°下 / 270°左），
   // 所以是 atan2(dx, -dy)。rAF 节流 + 值不变就不 setState（React 会跳过同值更新）。
-  // 注视基准点 = 「脸」在精灵里的相对高度。**别再用 0.33** ——
-  // 576×624 的帧里眼睛在 y≈89，也就是 14%；按三分之一算等于把基准点放到胸口，
-  // 于是「和眼睛齐平」的光标会被算成在下方，越往两边越偏成 down-left/down-right。
-  // 资源可以用 gazeFaceY 覆盖（不同画师的构图不一样）。
+  // 气泡会把容器撑高，所以「脸」的基准要减掉气泡、按精灵本身算，不然一冒泡视线就偏上。
   const pxNow = petSizePx((state && state.options) || {});
+  const bubbleFont = Math.max(11, Math.min(15, Math.round(pxNow * 0.115)));
+  const bubbleH = PET_BUBBLE[live] ? Math.round(bubbleFont * 2.9) : 0;
   // 只有「闲着」的时候才需要跟着光标转头。跑任务时（WORKING/...）根本不会注视，
   // 那就一个 mousemove 监听都不挂 —— 这是掉帧的主因之一，白白每帧量一次布局。
   // THINKING 也算：思考时宠物播的是 idle 段（不再单独抽搐），所以照样可以瞟光标。
@@ -2767,18 +2765,15 @@ function PetOverlay() {
       raf = 0;
       const e = last;
       if (!e) return;
-      const node = faceRef.current || boxRef.current;
+      const node = boxRef.current;
       if (!node) { setLook(null); return; }
       const now = Date.now();
       if (!rect || now - rectAt > 200) { rect = node.getBoundingClientRect(); rectAt = now; }
       if (!rect.width || !rect.height) { setLook(null); return; }
-      const faceY = (() => {
-        const r = petResRef.current;
-        const v = r && Number(r.gazeFaceY);
-        return Number.isFinite(v) && v > 0 ? Math.max(0.02, Math.min(0.6, v)) : 0.15;
-      })();
+      const spriteH = Math.max(1, rect.height - bubbleH);
+      // 「脸」大致在精灵块的上三分之一处
       const dx = e.clientX - (rect.left + rect.width / 2);
-      const dy = e.clientY - (rect.top + rect.height * faceY);
+      const dy = e.clientY - (rect.top + bubbleH + spriteH * 0.33);
       if (Math.hypot(dx, dy) < 24) { setLook(null); return; }   // 贴脸了就不扭
       const deg = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
       setLook(Math.round(deg / 22.5) % 16);
@@ -2800,7 +2795,7 @@ function PetOverlay() {
       window.removeEventListener("blur", onLeave);
       document.removeEventListener("mouseleave", onLeave);
     };
-  }, [canGaze, pxNow]);
+  }, [canGaze, bubbleH, pxNow]);
 
   if (!state || !state.enabled) return null;
   const inst = state.instances || [];
@@ -2966,31 +2961,18 @@ function PetOverlay() {
     inst.slice().reverse().map((it) =>
       react.createElement("div", {
         key: it.id,
-        ref: it.kind === "root" ? faceRef : null,
         title: it.kind === "root" ? ("主宠物 · " + live + "　单击互动 / 长按看看你 / 按住拖走") : ("子代理 " + it.owner),
         onPointerDown: grab,
         onPointerMove: move,
         onPointerUp: drop,
         onPointerCancel: ungrab,
         style: {
-          position: "relative",
           pointerEvents: "auto", cursor: dragging ? "grabbing" : "grab", touchAction: "none",
           display: "flex", flexDirection: "column", alignItems: "center",
         },
       },
         // 状态气泡只挂在主宠物头上（子代理自己不报状态）。
-        // **必须绝对定位**：它以前是列方向的第一个兄弟，容器又是按 top 钉住的
-        // （拖过之后 pos 就是 top/left），所以「一冒泡」整只宠物就被往下推 bubbleH 像素 ——
-        // 状态每变一次（IDLE↔WORKING…）就上下跳一次，用户看到的就是「整个人乱飞」。
-        // 绝对定位后它不再参与布局，宠物原地不动。
-        (it.kind === "root")
-          ? react.createElement("div", {
-              style: {
-                position: "absolute", bottom: "100%", left: "50%",
-                transform: "translateX(-50%)", marginBottom: 6, pointerEvents: "none",
-              },
-            }, react.createElement(PetBubble, { state: live, size: px }))
-          : null,
+        (it.kind === "root") ? react.createElement(PetBubble, { state: live, size: px }) : null,
         react.createElement(PetSprite, {
           resourceId: resId,
           resource: res,
