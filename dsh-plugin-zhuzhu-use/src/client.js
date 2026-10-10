@@ -847,6 +847,8 @@ const cardStyle = {
 		let accountBlockValues = null;
 		let accountBlockData = null;
 		let accountBlockFetching = false;
+		let accountBlockFetchedAt = 0;   // 上次**真正拿到新数据**的时刻
+		let accountBlockAttemptAt = 0;   // 上次发起请求的时刻（失败时限流，别每 500ms 打一次）
 
 		/** 设置外壳的 store 实例（带 actions / getSnapshot / subscribe）。 */
 		function settingsShellInstance() {
@@ -996,6 +998,9 @@ const cardStyle = {
 
 		function refreshAccountBlockData() {
 			if (accountBlockFetching) return;
+			// 失败/断网时也别每 500ms 打一次（syncAccountBlock 是 500ms 一轮）。
+			if (accountBlockAttemptAt && Date.now() - accountBlockAttemptAt < 5000) return;
+			accountBlockAttemptAt = Date.now();
 			accountBlockFetching = true;
 			fetch("/api/ds-zhuzhu-use/usage-card-cached", { cache: "no-store" })
 				.then((r) => r.json())
@@ -1003,9 +1008,18 @@ const cardStyle = {
 				.catch(() => {})
 				.then(() => fetch("/api/ds-zhuzhu-use/usage-card", { cache: "no-store" })
 					.then((r) => r.json())
-					.then((d) => { if (d && d.ok) { accountBlockData = d.data; fillAccountBlock(); } })
+					.then((d) => { if (d && d.ok) { accountBlockData = d.data; accountBlockFetchedAt = Date.now(); fillAccountBlock(); } })
 					.catch(() => {})
 					.finally(() => { accountBlockFetching = false; }));
+		}
+
+		/**
+		 * 数据够不够新：打开这一页会刷一次；留在这一页期间每 20 秒再刷一次
+		 * （syncAccountBlock 每 500ms 跑一轮，所以"自愈 + 周期刷新"都落在这一处）。
+		 */
+		function ensureAccountBlockData() {
+			const age = accountBlockData ? Date.now() - accountBlockFetchedAt : Infinity;
+			if (age > 20000) refreshAccountBlockData();
 		}
 
 		function removeAccountBlock() {
@@ -1030,7 +1044,7 @@ const cardStyle = {
 						card.insertAdjacentElement("afterend", accountBlockEl);
 					}
 					fillAccountBlock();
-					if (!accountBlockData) refreshAccountBlockData();
+					ensureAccountBlockData();
 					return true;
 				}
 				// 兜底：官方那一页的内容容器（锚点没找到时才用）。
@@ -1042,7 +1056,7 @@ const cardStyle = {
 				const sectionRoot = host.firstElementChild && host.firstElementChild.appendChild ? host.firstElementChild : host;
 				if (accountBlockEl.parentNode !== sectionRoot) sectionRoot.appendChild(accountBlockEl);
 				fillAccountBlock();
-				if (!accountBlockData) refreshAccountBlockData();
+				ensureAccountBlockData();
 				return true;
 			} catch (_) { return false; }
 		}
