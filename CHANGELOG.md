@@ -2,6 +2,13 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
+## 插件 dsh-plugin-zhuzhu-use 0.4.1 (2026-10-09)
+
+**并进官方「账号与余额」页的那块用量会自己刷新了。**
+
+- 打开那一页刷一次，停留期间每 20 秒再刷一次（`accountBlockFetchedAt` 记「上次真正拿到新数据」的时刻，`ensureAccountBlockData` 在每 500ms 的同步里判龄）
+- 请求失败按 5 秒限流（`accountBlockAttemptAt`）—— 以前一次失败会被 `syncAccountBlock` 的 500ms 轮询反复重打
+- 并发保护（`accountBlockFetching`）；先画宿主缓存那份、再打实时接口覆盖
 ## 插件 dsh-plugin-zhuzhu-use 0.4.0 (2026-10-08)
 
 **余额直读官方账号服务；用量并进官方「账号与余额」页；`/usage` 按运行状态分流显示。**
