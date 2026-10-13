@@ -2,6 +2,14 @@
 
 桌面壳版本记录。0.9.1 起安装包名为 `dsh-<版本>-win-x64.exe`（官方 desktop 构建），0.8.x 及更早为 `DeepSeek Harness Setup <ver>.exe`（自研壳）。
 
+## 插件 dsh-plugin-zhuzhu-use 0.4.2 (2026-10-13)
+
+**新增设置项「代码块字号」（与正文分开调）。**
+
+- 客户端往页面挂一条覆盖内核排版 token 的样式表（`--dsw-font-markdown-code-block` / `-small` 及其 `-font-size` / `-line-height`，还有 `--dsw-font-markdown-code-line-height`）：单例 `<style id="ds-zhuzhu-code-font">`、内容变了才写，`0` = 跟随正文；挂 `-small` 的 `--dsl-terminal-font` 会自动跟着变。模块加载时就挂一次（不依赖 ui-options 请求成功 —— 之前路由注册炸过，样式没挂上，导致箭头一直露在外面）
+- 值存在宿主 `~/.dsh/ds-zhuzhu-use/ui.json`（读写合并式，跨重启保留），路由 `GET /ui-options` + `POST /ui-options/set`（带范围钳制）
+- 设置行放在官方「字号」那行后面（order 12），样式照抄官方同行（row padding / 分隔线 / 字号层级 / stepper 圆角与尺寸）
+- 记录一条内核行为：**exact route 表按 path 唯一**（methods 挂在同一条目上），同一 path 注册两次会抛错并把同一 effect 里后面的路由一起回滚 —— 所以写回一律走 `/set` 后缀
 ## 插件 dsh-plugin-zhuzhu-use 0.4.1 (2026-10-09)
 
 **并进官方「账号与余额」页的那块用量会自己刷新了。**

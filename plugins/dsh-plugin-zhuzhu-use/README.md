@@ -6,13 +6,18 @@
 > 软件本体已由 **DeepSeek 官方桌面版**提供（官方仓库 [`apps/desktop`](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop)）。
 > 本仓库不再发布软件本体，只更新这个插件 —— 见置顶公告 [#2](https://github.com/GengruiZhu/deepseek-harness-desktop-on-windows/issues/2)。
 
-**当前版本 `0.4.1`** —— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
+**当前版本 `0.4.2`** —— 0.3.0 是**更名**（`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`，对齐 `dsh-plugin-*` 惯例）；0.3.1–0.3.3 陆续加了：
 
 - **子代理驱动管理**（设置 →「子代理」）：Codex CLI / Claude Code SDK 两个可选 provider 可单独装、单独删（自研 pnpm 驱动、NDJSON 事件流进度、可取消可重试、装完复核三项清单、删除含 `.pnpm` 真内容与孤儿清理）
 - **插件更新管理**：检查更新 / 单个更新 / 全部更新
 - **Agent 预设修复**：内核升级改名后一键修 profile 里的旧行
 - **宠物按需安装/卸载**：下载进度、取消、卸载
 - 路由注册迁到官方桌面壳的 `connection.fetch` exact route（桌面进程里没有 `ctx.webServer`）
+
+**0.4.2 改了什么**
+
+- `设置 → 通用设置` 新增一行**「代码块字号」**（紧跟在官方那行「字号」后面、同一套样式数值）：代码块（` 里的内容）与行内代码的字号可以**和正文分开调**，范围 10–24px，默认「跟随正文」。内核默认代码块只有 11px（比行内代码的 12px 还小），这行就是把它调大的入口。
+  实现：往 <head> 塞一条 `!important` 样式表覆盖内核排版 token（`--dsw-font-markdown-code-block(-small)` / `--dsw-font-markdown-code`），行高按同比例放大；另外直接命中代码块元素 `pre.shiki`（内核 `SHIKI_PRE_PROPS` 里写死的类名，不带 hash）。`!important` 必需：官方主题会把这些 token 写成 body 的行内样式。值存在 `~/.dsh/ds-zhuzhu-use/ui.json`，跨重启保留。
 
 **0.4.1 改了什么**
 
@@ -116,8 +121,8 @@ dsh-plugin-zhuzhu-use
 
 | 填法 | 填什么 |
 | --- | --- |
-| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.4.1.tgz` |
-| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.4.1.tgz` 的**绝对路径** |
+| **`.tgz` 直链** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.4.2.tgz` |
+| **本地 `.tgz` 文件** | 本分支根目录 `dsh-plugin-zhuzhu-use-0.4.2.tgz` 的**绝对路径** |
 | **本地插件目录** | 解包后的目录绝对路径（解包 tgz 得到 `package/`），或直接用 `dsh-plugin-zhuzhu-use/` 源码目录 |
 
 > - 「GitHub 仓库地址」这条路**不适用**：本插件在仓库的**子目录**且不在默认分支，安装器会拿到仓库根的 `package.json`（`dsh-desktop`，没有 `dsh.bundle`）→ 报「这个包没有声明组合包」。
@@ -126,7 +131,7 @@ dsh-plugin-zhuzhu-use
 ### 用法三：npm install / 源码目录
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.4.1.tgz"   # 本地 tgz（本分支根目录）
+npm install ".\dsh-plugin-zhuzhu-use-0.4.2.tgz"   # 本地 tgz（本分支根目录）
 npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源装
 # 若你的安装带 CLI：
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use
@@ -187,7 +192,12 @@ npm install dsh-plugin-zhuzhu-use                 # 或直接从 npm 官方源�
 
 Official `dsh`-format **first-party plugin**, published on the `plugin-assets` branch (it does not take part in `main`'s release flow). **Licensing follows `main`** — the repository's [LICENSE](../LICENSE) (MIT). The application itself now comes from the [official desktop app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/desktop); this repo only maintains the plugin.
 
-**Current version `0.4.1`** — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+**Current version `0.4.2`** — 0.3.0 was the rename (`ds_zhuzhu_use` → `dsh-plugin-zhuzhu-use`, matching the `dsh-plugin-*` convention); 0.3.1–0.3.3 added: **subagent driver management** (install/remove the Codex CLI and Claude Code SDK providers from Settings → Subagents — our own pnpm driver, NDJSON progress, cancel/retry, three-way post-install verification, removal that also cleans `.pnpm` and orphans), **plugin update management** (check / update one / update all), **agent-preset repair**, **pet install/uninstall on demand**, and route registration moved to the desktop shell's `connection.fetch` exact routes (the desktop process has no `ctx.webServer`).
+
+**What changed in 0.4.2**
+
+- A new **"Code block font size"** row in `Settings → General` (right after the official "Font size" row, same style values): code blocks (the ` fences) and inline code can be sized **independently of body text**, 10–24 px, default "follow body text". The kernel ships code blocks at only 11 px (smaller than the 12 px inline code), so this row is the way to enlarge them.
+  How: one `!important` stylesheet injected into <head> overrides the kernel's typography tokens (`--dsw-font-markdown-code-block(-small)`, `--dsw-font-markdown-code`) and scales their line-heights by the same ratio; it also targets the code block element directly (`pre.shiki` — the class name the kernel hardcodes in `SHIKI_PRE_PROPS`, not a hashed one). `!important` is required because the official theme writes those tokens as inline styles on body. The value lives in `~/.dsh/ds-zhuzhu-use/ui.json` and survives restarts.
 
 **What changed in 0.4.1**
 
@@ -219,8 +229,8 @@ It is published to the npm registry, so the installer fetches it automatically (
 
 | Input | What to enter |
 | --- | --- |
-| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.4.1.tgz` |
-| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.4.1.tgz` at the branch root |
+| **`.tgz` URL** | `https://raw.githubusercontent.com/GengruiZhu/deepseek-harness-desktop-on-windows/plugin-assets/dsh-plugin-zhuzhu-use-0.4.2.tgz` |
+| **Local `.tgz` file** | absolute path to `dsh-plugin-zhuzhu-use-0.4.2.tgz` at the branch root |
 | **Local plugin directory** | absolute path to the unpacked directory (unpacking the tarball yields `package/`), or the `dsh-plugin-zhuzhu-use/` source directory |
 
 > A **GitHub repository address does not work here**: the plugin sits in a **subdirectory** of a branch that is not the default one, so the installer reads the repository root `package.json` (`dsh-desktop`, no `dsh.bundle`) and reports *This package declares no bundle*. The installer validates `dsh.bundle` (this plugin has it) and leaves the plugin **installed but not enabled** — click **Enable now** or restart.
@@ -228,7 +238,7 @@ It is published to the npm registry, so the installer fetches it automatically (
 **Way 3 — npm install / source directory.**
 
 ```powershell
-npm install ".\dsh-plugin-zhuzhu-use-0.4.1.tgz"   # local tarball from this branch
+npm install ".\dsh-plugin-zhuzhu-use-0.4.2.tgz"   # local tarball from this branch
 npm install dsh-plugin-zhuzhu-use                 # or straight from the npm registry
 # with a CLI-enabled install:
 #   dsh plugin --profile desktop add dsh-plugin-zhuzhu-use

@@ -2989,6 +2989,32 @@ function openInExplorer(targetPath) {
 }
 
 // ---- Usage 富卡片数据（供客户端 commandview 渲染）----
+// ---- 插件自己的界面选项（目前只有"代码块字号"）----
+/**
+ * `~/.dsh/ds-zhuzhu-use/ui.json`：插件侧的界面选项。
+ * 代码块字号是**客户端**的事（往页面里塞一条覆盖内核排版 token 的样式），但值要跨重启留住，
+ * 所以放在宿主这边存一份，客户端起步时读回来。
+ */
+const uiOptionsPath = () => join(dshHome(), 'ds-zhuzhu-use', 'ui.json')
+
+function readUiOptions() {
+  try {
+    const raw = JSON.parse(readFileSync(uiOptionsPath(), 'utf8'))
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch (_) { return {} }
+}
+
+function writeUiOptions(patch) {
+  const next = { ...readUiOptions(), ...(patch && typeof patch === 'object' ? patch : {}) }
+  try {
+    mkdirSync(dirname(uiOptionsPath()), { recursive: true })
+    writeFileSync(uiOptionsPath(), JSON.stringify(next, null, 2) + '\n', 'utf8')
+  } catch (error) {
+    usageDebug('写 ui.json 失败：' + (error && error.message ? error.message : error))
+  }
+  return next
+}
+
 /**
  * 有没有 agent 正在跑（客户端决定"运行中开设置页 / 空闲看卡片"用的）。
  * 返回 true / false，问不到（没有 agents 服务、或这个内核的 agent 不带 status 字段）返回 null，
@@ -3860,6 +3886,16 @@ export function apply(ctx, config = {}) {
         usageDebug('client: ' + String((body && body.m) || ''))
         return { ok: true }
       })),
+      // 插件的界面选项（代码块字号）：客户端起步读一次，改了就写回。
+      // 注意：内核的 exact route 表**按 path 唯一**（methods 挂在同一条目上），
+      // 同一个 path 注册两次会抛错、并把同一块 effect 里后面的路由一起回滚 ——
+      // 所以写回用 `/set` 后缀，和 `/scope` + `/scope/set` 保持同一个写法。
+      ctx.connection.fetch.register(jsonRoute('/api/ds-zhuzhu-use/ui-options', () => ({
+        ok: true, data: readUiOptions(),
+      }))),
+      ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/ui-options/set', (body) => ({
+        ok: true, data: writeUiOptions(body),
+      }))),
       ctx.connection.fetch.register(postRoute('/api/ds-zhuzhu-use/token', (body) => {
         if (body && body.action === 'set') {
           const t = body && typeof body.token === 'string' ? body.token.trim() : ''
