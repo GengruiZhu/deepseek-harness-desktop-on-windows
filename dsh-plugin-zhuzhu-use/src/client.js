@@ -1161,6 +1161,166 @@ const cardStyle = {
 
 
 		// ==================== 左侧栏：工作区 / Chat 两个入口 ====================
+		// ==================== 代码块字号（和正文分开调） ====================
+		// 内核把正文和代码的字号都做成了 CSS 变量（theme 的排版 token）：
+		//   正文    --dsh-content-font-size（官方「字号」那行调的就是它）
+		//   代码块  --dsw-font-markdown-code-block / -small
+		//   行内代码 --dsw-font-markdown-code
+		// 代码块原值只有 11px（比行内代码的 12px 还小），所以这里单独给一档。
+		// 覆盖方式：往 <head> 塞一条 **!important** 的 body 规则。!important 是必须的 ——
+		// 官方主题运行时会把这些 token 写成 body 的行内样式，普通规则压不过行内样式，
+		// 而样式表里的 !important 可以。
+		const CODE_FONT_STYLE_ID = "ds-zhuzhu-code-font";
+		const CODE_FONT_MIN = 10;
+		const CODE_FONT_MAX = 24;
+		const CODE_FONT_START = 13;   // 从「跟随正文」第一次调大时的起点
+		let codeFontSize = 0;         // 0 = 跟随正文
+
+		const codeFontFam = () => "var(--ds-font-family-code)";
+		const codeFontLh = (size, ratio) => Math.round(size * ratio) + "px";
+
+		function codeFontStyleText(size) {
+			const parts = [
+				// 我们这一行的上下箭头：官方是 hover/focus 才显示，这里用同样的小规则
+				"#ds-zhuzhu-code-font-row .zz-code-font-arrows{opacity:0}",
+				"#ds-zhuzhu-code-font-row:hover .zz-code-font-arrows,#ds-zhuzhu-code-font-row:focus-within .zz-code-font-arrows{opacity:1}",
+			];
+			if (!size) return parts.join("");
+			const fam = codeFontFam();
+			parts.unshift([
+				// 1) 元素级：会话里的代码块就是 `pre.shiki`（这个类名在内核源码里写死 —— SHIKI_PRE_PROPS
+				//    的 className 是 "shiki css-variables"，不带 hash），行内代码是段落里的 `code`。
+				"pre.shiki,pre.shiki code,.shiki code{font-size:" + size + "px !important;line-height:1.73 !important}",
+				"code:not(pre code){font-size:" + size + "px !important}",
+				// 2) token 级：内核把一套排版 token 定义在 body 的**行内样式**上（普通规则压不过行内
+				//    样式，所以必须 !important）。工具卡片里的输出来自这些 token —— 比如终端卡片的
+				//    `--dsl-terminal-font: var(--dsw-font-markdown-code-block-small)` 会自动跟着变。
+				//    行高给无单位比例（原值 19/11、16/11、19/12），字号变大时行高按比例放大，不会挤。
+				"body{",
+				"--dsw-font-markdown-code-block:" + size + "px/1.727 " + fam + " !important;",
+				"--dsw-font-markdown-code-block-font-size:" + size + "px !important;",
+				"--dsw-font-markdown-code-block-line-height:" + codeFontLh(size, 19 / 11) + " !important;",
+				"--dsw-font-markdown-code-block-small:" + size + "px/1.455 " + fam + " !important;",
+				"--dsw-font-markdown-code-block-small-font-size:" + size + "px !important;",
+				"--dsw-font-markdown-code-block-small-line-height:" + codeFontLh(size, 16 / 11) + " !important;",
+				"--dsw-font-markdown-code:" + size + "px/1.583 " + fam + " !important;",
+				"--dsw-font-markdown-code-font-size:" + size + "px !important;",
+				"--dsw-font-markdown-code-line-height:" + codeFontLh(size, 19 / 12) + " !important;",
+				"}",
+			].join(""));
+			return parts.join("");
+		}
+
+		function applyCodeFontSize(size) {
+			codeFontSize = Number(size) || 0;
+			try {
+				let tag = document.getElementById(CODE_FONT_STYLE_ID);
+				if (!tag) {
+					tag = document.createElement("style");
+					tag.id = CODE_FONT_STYLE_ID;
+					document.head.appendChild(tag);
+				}
+				const text = codeFontStyleText(codeFontSize);
+				if (tag.textContent !== text) tag.textContent = text;
+			} catch (_) { /* 塞不进去也不影响别的功能 */ }
+		}
+
+		// 起步就把这条样式表挂上（它同时带着箭头 hover 的小规则）——
+		// 不依赖 ui-options 请求成功：之前路由注册炸了的时候，这里没挂上，
+		// 结果上下箭头就一直露在外面、和新版式的值挤在一起。
+		applyCodeFontSize(codeFontSize);
+
+		/** 起步时把存下来的代码块字号应用一遍（值存在宿主那边，跨重启保留）。 */
+		function CodeFontRuntime() {
+			useEffect(() => {
+				fetch("/api/ds-zhuzhu-use/ui-options", { cache: "no-store" })
+					.then((r) => r.json())
+					.then((d) => { if (d && d.ok) applyCodeFontSize(Number((d.data || {}).codeFontSize) || 0); })
+					.catch(() => {});
+			}, []);
+			return null;
+		}
+
+		/**
+		 * 设置 → 通用设置 里的「代码块字号」。
+		 *
+		 * 样式照抄官方那行「字号」的真实数值（同一套：row padding 16px 0 + .5px 分隔线、
+		 * title 14/22 primary、desc 12/18 tertiary、stepper 圆角+背景+min-width 72/height 36、
+		 * 箭头 17x12 + hover 底色），所以它在那张列表里看起来就是官方自己的行。
+		 */
+		function CodeFontRow() {
+			const [size, setSize] = useState(null);   // null = 读取中
+			useEffect(() => {
+				fetch("/api/ds-zhuzhu-use/ui-options", { cache: "no-store" })
+					.then((r) => r.json())
+					.then((d) => {
+						if (!d || !d.ok) { setSize(0); return; }
+						const px = Number((d.data || {}).codeFontSize) || 0;
+						setSize(px);
+						applyCodeFontSize(px);
+					})
+					.catch(() => setSize(0));
+			}, []);
+
+			const save = (px) => {
+				const clamped = px <= 0 ? 0 : Math.min(CODE_FONT_MAX, Math.max(CODE_FONT_MIN, px));
+				setSize(clamped);
+				applyCodeFontSize(clamped);
+				try {
+					// 写回走 /set：内核的 exact route 表按 path 唯一，GET/POST 不能共用一个 path。
+					fetch("/api/ds-zhuzhu-use/ui-options/set", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({ codeFontSize: clamped }),
+					}).catch(() => {});
+				} catch (_) { /* 存不上也先按当前会话生效 */ }
+			};
+
+			const canUp = size !== null && size < CODE_FONT_MAX;
+			const canDown = size !== null && size > 0;
+			const rowStyle = { borderBottom: "0.5px solid var(--dsw-alias-border-l2)", alignItems: "center", gap: "8px", padding: "16px 0", display: "flex" };
+			const rowText = { flexDirection: "column", flex: "1", gap: "4px", minWidth: "0", paddingRight: "48px", display: "flex" };
+			const titleStyle = { color: "var(--dsw-alias-label-primary)", fontSize: "14px", fontWeight: 400, lineHeight: "22px" };
+			const descStyle = { color: "var(--dsw-alias-label-tertiary)", fontSize: "12px", fontWeight: 400, lineHeight: "18px" };
+			const stepperStyle = { borderRadius: "var(--dsw-radius-md)", background: "var(--dsw-alias-bg-module-platform)", justifyContent: "center", alignItems: "center", minWidth: "72px", height: "36px", display: "inline-flex", position: "relative" };
+			const valueStyle = { textAlign: "center", fontVariantNumeric: "tabular-nums", minWidth: "18px", color: size ? "var(--dsw-alias-label-primary)" : "var(--dsw-alias-label-secondary)", fontSize: "14px", lineHeight: "22px" };
+			const unitStyle = { color: "var(--dsw-alias-label-secondary)", fontSize: "14px", lineHeight: "22px" };
+			const arrowsStyle = { flexDirection: "column", gap: "2px", display: "flex", position: "absolute", right: "8px" };
+			const arrowStyle = (disabled) => ({
+				borderRadius: "var(--dsw-radius-xs)",
+				background: "color-mix(in srgb, var(--dsw-alias-bg-layer-1) 75%, transparent)",
+				width: "17px", height: "12px",
+				color: disabled ? "var(--dsw-alias-label-caption)" : "var(--dsw-alias-label-primary)",
+				cursor: disabled ? "default" : "pointer",
+				border: "none", display: "inline-flex", justifyContent: "center", alignItems: "center", padding: 0,
+			});
+			const chevron = (up) => react.createElement("svg", { width: 9, height: 6, viewBox: "0 0 9 6", fill: "none", xmlns: "http://www.w3.org/2000/svg" },
+				react.createElement("path", {
+					d: up ? "M1 5L4.5 1.5L8 5" : "M1 1L4.5 4.5L8 1",
+					stroke: "currentColor", strokeWidth: 1.2, strokeLinecap: "round", strokeLinejoin: "round",
+				}));
+
+			return react.createElement("div", { id: "ds-zhuzhu-code-font-row", style: rowStyle },
+				react.createElement("div", { style: rowText },
+					react.createElement("div", { style: titleStyle }, "代码块字号"),
+					react.createElement("div", { style: descStyle }, "``` 里的代码单独调；「自动」= 跟随正文")),
+				react.createElement("div", { style: { display: "inline-flex", alignItems: "center", gap: "8px" } },
+					react.createElement("div", { style: stepperStyle },
+						react.createElement("span", { style: valueStyle }, size === null ? "…" : (size ? size : "自动")),
+						react.createElement("span", { className: "zz-code-font-arrows", style: arrowsStyle },
+							react.createElement("button", {
+								type: "button", style: arrowStyle(!canUp), disabled: !canUp,
+								"aria-label": "调大代码块字号",
+								onClick: () => save(!size ? CODE_FONT_START : size + 1),
+							}, chevron(true)),
+							react.createElement("button", {
+								type: "button", style: arrowStyle(!canDown), disabled: !canDown,
+								"aria-label": "调小代码块字号",
+								onClick: () => save(size <= CODE_FONT_MIN ? 0 : size - 1),
+							}, chevron(false)))),
+					size ? react.createElement("span", { style: unitStyle }, "px") : null));
+		}
+
 		/**
 		 * 平台用量令牌（今日消费 / 趋势 / 按模型明细靠它；余额走官方账号服务，不需要令牌）。
 		 *
@@ -4588,6 +4748,15 @@ dpRegister({ id: PV_SLIDES, extensions: ["pptx", "ppt"], priority: "extension", 
 			// 平台用量令牌的设置入口（从输入框上方挪过来的）。
 			ctx.slots.inject("settings.general.item", () =>
 				ctx.slots.register({ name: "settings.general.item", id: "ds_zhuzhu_use-platform-token", order: 51 }, guarded(PlatformTokenRow))
+			);
+
+			// 「代码块字号」：紧跟在官方那行「字号」后面（官方 order = 11，所以这里 12）。
+			ctx.slots.inject("settings.general.item", () =>
+				ctx.slots.register({ name: "settings.general.item", id: "ds_zhuzhu_use-code-font", order: 12 }, guarded(CodeFontRow))
+			);
+			// 起步应用一次存下来的代码块字号（纯逻辑，不画东西）。
+			ctx.slots.inject("shell.overlay", () =>
+				ctx.slots.register({ name: "shell.overlay", id: "ds_zhuzhu_use-code-font-apply", order: 73 }, CodeFontRuntime)
 			);
 
 			// 侧栏的「检查更新」入口也下线：它查的是我们仓库的 release（0.9.x 那套）。
